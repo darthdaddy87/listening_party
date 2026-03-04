@@ -80,6 +80,685 @@
     await db.ref(`rooms/${code}`).set({ code, hostId:pid, createdAt: firebase.database.ServerValue.TIMESTAMP, currentSong:null, songStartedAt:null });
     await db.ref(`rooms/${code}/players/${pid}`).set({ name, score:0, color:COLORS[0], joinedAt: firebase.database.ServerValue.TIMESTAMP });
     saveSession();
+    // Update URL with room code for easy sharing
+    window.history.replaceState({}, '', `?room=${code}`);
+    initApp();
+  };
+
+  window.joinRoom = async function() {
+    const name = document.getElementById('join-name').value.trim();
+    const code = document.getElementById('join-code').value.trim().toUpperCase();
+    if (!name) { toast('Enter your name first','red'); return; }
+    if (!code) { toast('Enter a room code','red'); return; }
+    const snap = await db.ref(`rooms/${code}`).once('value');
+    if (!snap.exists()) { toast('Room not found — check the code','red'); return; }
+    const pid = genId();
+    local.roomCode = code; local.playerId = pid; local.playerName = name; local.isHost = false;
+    const players = snap.val().players || {};
+    const taken = Object.values(players).map(p => p.color);
+    const color = COLORS.find(c => !taken.includes(c)) || COLORS[0];
+    await db.ref(`rooms/${code}/players/${pid}`).set({ name, score:0, color, joinedAt: firebase.database.ServerValue.TIMESTAMP });
+    saveSession();
+    window.history.replaceState({}, '', `?room=${code}`);
+    initApp();
+  };
+
+  window.copyLink = function() {
+    const url = window.location.href.split('?')[0] + (local.roomCode ? `?room=${local.roomCode}` : '');
+    navigator.clipboard.writeText(url).then(() => {
+      toast('Link copied ✓', 'green');
+    }).catch(() => {
+      // Fallback for older browsers
+      const el = document.createElement('textarea');
+      el.value = url;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+      toast('Link copied ✓', 'green');
+    });
+  };
+
+  window.leaveRoom = async function() {
+    if (local.playerId && local.roomCode) {
+      await db.ref(`rooms/${local.roomCode}/players/${local.playerId}`).remove();
+      await db.ref(`rooms/${local.roomCode}/submissions/${local.playerId}`).remove();
+    }
+    clearSession();
+    location.reload();
+  };
+
+  // ── INIT ──
+  function initApp() {
+    document.getElementById('landing').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    document.getElementById('header-code').textContent = local.roomCode;
+    if (local.isHost) document.getElementById('host-btn').style.display = 'inline-flex';
+    document.getElementById('leave-btn').style.display = 'inline-flex';
+    document.getElementById('copy-link-btn').style.display = 'inline-flex';
+    subscribeToRoom();
+    initYouTube();
+  }
+
+  // Auto-fill room code from URL param
+  (function() {
+    const params = new URLSearchParams(window.location.search);
+    const roomParam = params.get('room');
+    if (roomParam) {
+      // Wait for DOM then pre-fill join code
+      document.addEventListener('DOMContentLoaded', () => {
+        const joinCode = document.getElementById('join-code');
+        if (joinCode) joinCode.value = roomParam.toUpperCase();
+        // Scroll join card into view on mobile
+        const joinName = document.getElementById('join-name');
+        if (joinName) joinName.focus();
+      });
+    }
+  })();
+
+  tryAutoReconnect();
+
+  // ── SUBSCRIBE ──
+  let prevSongKey = null;
+  window._majorityTriggered = false;
+  window._firstSongTriggered = false;
+
+  function subscribeToRoom() {
+    db.ref(`rooms/${local.roomCode}`).on('value', snap => {
+      if (!snap.exists()) return;
+      const room = snap.val();
+      const players = room.players || {};
+      const submissions = room.submissions || {};
+      const song = room.currentSong || null;
+
+      renderAvatars(players);
+      renderPlayerList(players);
+        renderSubmitArea(submissions);
+      updateStatusChip(!!song);
+
+      // Song changed?
+      const songKey = song ? song.link + song.submitterId : null;
+      if (songKey !== prevSongKey) {
+        prevSongKey = songKey;
+        if (song) playSong(song, room.songStartedAt);
+        else stopSong();
+      }
+
+      if (!local.isHost) return;
+
+      const pc = Object.keys(players).length;
+      const djId = song ? song.submitterId : null;
+
+      // Non-DJ submissions count toward threshold, threshold is majority of ALL players
+      const nonDjSubmissions = Object.keys(submissions).filter(pid => pid !== djId);
+      const maj = Math.ceil(pc / 2);
+      const sc = nonDjSubmissions.length;
+
+      if (song && sc >= maj && !window._majorityTriggered) {
+        window._majorityTriggered = true;
+        setTimeout(() => triggerCut(players, submissions, song), 800);
+      }
+      if (song && sc < maj) window._majorityTriggered = false;
+
+      // No current song — first submission plays immediately
+      const scAll = Object.keys(submissions).length;
+      if (!song && scAll >= 1 && !window._firstSongTriggered && !_hostCompleteLock) {
+        window._firstSongTriggered = true;
+        setTimeout(() => triggerCut(players, submissions, null), 800);
+      }
+      if (!song && scAll < 1) window._firstSongTriggered = false;
+    });
+  }
+
+  // ── RENDER ──
+  function renderAvatars(players) {
+    document.getElementById('avatar-row').innerHTML = Object.values(players).slice(0,6).map(p =>
+      `<div class="avatar" style="background:${p.color}">${p.name[0].toUpperCase()}</div>`).join('');
+  }
+
+  function renderPlayerList(players) {
+    const sorted = Object.entries(players).sort((a,b) => b[1].score - a[1].score);
+    // Persist current score to localStorage
+    const myEntry = players[local.playerId];
+    if (myEntry) { local.lastScore = myEntry.score; saveSession(myEntry.score); }
+    document.getElementById('player-list').innerHTML = sorted.map(([pid,p],i) => `
+      <div class="player-row">
+        <div class="player-rank">${i+1}</div>
+        <div class="avatar-sm" style="background:${p.color}">${p.name[0].toUpperCase()}</div>
+        <div class="player-name ${pid===local.playerId?'is-you':''}">${p.name}</div>
+        <div class="player-score">${p.score}</div>
+        ${local.isHost && pid !== local.playerId ? `<button class="remove-btn" onclick="hostRemovePlayer('${pid}')">✕</button>` : ''}
+      </div>`).join('');
+  }
+
+  window.hostRemovePlayer = async function(pid) {
+    if (!local.isHost) return;
+    await db.ref(`rooms/${local.roomCode}/players/${pid}`).remove();
+    await db.ref(`rooms/${local.roomCode}/submissions/${pid}`).remove();
+    toast('Player removed');
+  };
+
+
+  function renderSubmitArea(submissions) {
+    const mine = submissions[local.playerId];
+    document.getElementById('submit-area').style.display = mine ? 'none' : 'flex';
+    document.getElementById('submitted-state').style.display = mine ? 'flex' : 'none';
+    if (mine) document.getElementById('submitted-link-display').textContent = mine.link;
+  }
+
+  function updateStatusChip(live) {
+    document.getElementById('status-chip-wrap').innerHTML = live
+      ? `<span class="status-chip live"><span class="dot-blink"></span> Live</span>`
+      : `<span class="status-chip waiting"><span class="dot-blink"></span> Waiting</span>`;
+  }
+
+  // ── SUBMIT ──
+  window.submitSong = async function() {
+    const input = document.getElementById('link-input');
+    const link = input.value.trim();
+    if (!link) { toast('Paste a link first','red'); return; }
+    await rref(`submissions/${local.playerId}`).set({ link, playerName:local.playerName, timestamp:Date.now() });
+    input.value = '';
+    toast('Locked in ✓','green');
+  };
+
+  window.cancelSubmission = async function() {
+    await rref(`submissions/${local.playerId}`).remove();
+  };
+
+  // ── CUT ──
+  async function triggerCut(players, submissions, currentSong) {
+    if (!local.isHost) return;
+    let winnerId = null, earliest = Infinity;
+    for (const [pid,sub] of Object.entries(submissions)) {
+      if (sub.timestamp < earliest) { earliest = sub.timestamp; winnerId = pid; }
+    }
+    if (!winnerId) return;
+
+    const winnerSub = submissions[winnerId];
+    const winnerPlayer = players[winnerId];
+    const updates = {};
+
+    if (currentSong) {
+      const djId = currentSong.submitterId;
+      const p = local.progress;
+
+      if (winnerId === djId) {
+        // DJ cut their own song — lose 3 pts, everyone else with a submission gets 3
+        updates[`players/${djId}/score`] = Math.max(0, (players[djId]?.score||0) - 3);
+        for (const pid of Object.keys(submissions)) {
+          if (pid !== djId) {
+            updates[`players/${pid}/score`] = (players[pid]?.score||0) + 3;
+          }
+        }
+        toast(`${winnerPlayer?.name} cut their own song! -3 pts`, 'red');
+      } else {
+        // Normal cut scoring
+        let djPts = 0, cutterPts = 0;
+        if (p < 66)      { cutterPts = 3; djPts = 0; }
+        else if (p < 90) { cutterPts = 2; djPts = 1; }
+        else             { cutterPts = 1; djPts = 2; }
+        updates[`players/${winnerId}/score`] = (winnerPlayer?.score||0) + cutterPts;
+        if (djPts > 0) updates[`players/${djId}/score`] = (players[djId]?.score||0) + djPts;
+        toast(`${winnerPlayer?.name} cuts the song! +${cutterPts} pts`, 'red');
+      }
+
+      const flash = document.getElementById('interrupt-flash');
+      flash.style.display = 'block';
+      setTimeout(() => flash.style.display = 'none', 500);
+    }
+
+    updates['currentSong'] = { link:winnerSub.link, submitterId:winnerId, submitterName:winnerPlayer?.name||'?' };
+    updates['songStartedAt'] = firebase.database.ServerValue.TIMESTAMP;
+    updates['submissions'] = null;
+    await db.ref(`rooms/${local.roomCode}`).update(updates);
+  }
+
+  // ── PLAY ──
+  function playSong(song, songStartedAt) {
+    stopProgress();
+    local.progress = 0;
+    document.getElementById('no-song-state').style.display = 'none';
+    document.getElementById('song-state').style.display = 'flex';
+    document.getElementById('song-submitter').textContent = `submitted by ${song.submitterName}`;
+    document.getElementById('song-link').textContent = song.link;
+    document.getElementById('song-link').href = song.link;
+
+    const ytId = extractYouTubeId(song.link);
+    if (ytId) {
+      // Only host sees the video player
+      if (local.isHost) {
+        document.getElementById('yt-player-wrap').style.display = 'block';
+        document.getElementById('album-art').style.display = 'none';
+        if (ytReady && ytPlayer && ytPlayer.loadVideoById) loadYTVideo(ytId);
+        else local.pendingVideoId = ytId;
+      } else {
+        document.getElementById('yt-player-wrap').style.display = 'none';
+        document.getElementById('album-art').style.display = 'flex';
+        local.songStartTime = songStartedAt ? Date.now() - (Date.now() - songStartedAt) : Date.now();
+        startProgress();
+      }
+      document.getElementById('song-title').textContent = 'Loading…';
+      fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(song.link)}&format=json`)
+        .then(r=>r.json()).then(d=>{
+          const title = d.title||'YouTube Track';
+          document.getElementById('song-title').textContent = title;
+          // Update YouTube Music deep link
+          const ytBtn = document.getElementById('yt-music-btn');
+          ytBtn.href = `https://music.youtube.com/search?q=${encodeURIComponent(title)}`;
+          ytBtn.style.display = 'inline-flex';
+        })
+        .catch(()=>{
+          document.getElementById('song-title').textContent = 'YouTube Track';
+          const ytBtn = document.getElementById('yt-music-btn');
+          ytBtn.href = `https://music.youtube.com/search?q=${encodeURIComponent(song.link)}`;
+          ytBtn.style.display = 'inline-flex';
+        });
+    } else {
+      document.getElementById('yt-player-wrap').style.display = 'none';
+      document.getElementById('album-art').style.display = 'flex';
+      document.getElementById('song-title').textContent = song.link;
+      local.songStartTime = Date.now();
+      startProgress();
+    }
+  }
+
+  function stopSong() {
+    stopProgress();
+    if (ytPlayer && ytPlayer.stopVideo) ytPlayer.stopVideo();
+    document.getElementById('no-song-state').style.display = 'flex';
+    document.getElementById('song-state').style.display = 'none';
+    document.getElementById('yt-player-wrap').style.display = 'none';
+    document.getElementById('progress-fill').style.width = '0%';
+    document.getElementById('yt-music-btn').style.display = 'none';
+  }
+
+  // ── YOUTUBE ──
+  let ytPlayer = null, ytReady = false;
+
+  function initYouTube() {
+    if (window.YT && window.YT.Player) createYTPlayer();
+    else window.onYouTubeIframeAPIReady = createYTPlayer;
+  }
+
+  function createYTPlayer() {
+    ytReady = true;
+    ytPlayer = new YT.Player('yt-player', {
+      height:'100%', width:'100%', videoId:'',
+      playerVars:{ autoplay:1, controls:1, rel:0, modestbranding:1 },
+      events:{
+        onStateChange: e => {
+          if (e.data===YT.PlayerState.ENDED) hostComplete();
+          if (e.data===YT.PlayerState.PLAYING) { const d=ytPlayer.getDuration(); if(d) local.songDuration=d; startProgress(); }
+          if (e.data===YT.PlayerState.PAUSED) stopProgress();
+        },
+        onReady: () => { if (local.pendingVideoId) loadYTVideo(local.pendingVideoId); }
+      }
+    });
+  }
+
+  function extractYouTubeId(url) {
+    try {
+      const u = new URL(url);
+      if (u.hostname.includes('youtu.be')) return u.pathname.slice(1).split('?')[0];
+      if (u.hostname.includes('youtube.com')) return u.searchParams.get('v');
+    } catch(e) {}
+    return null;
+  }
+
+  function loadYTVideo(id) { local.pendingVideoId=null; if(ytPlayer&&ytPlayer.loadVideoById) ytPlayer.loadVideoById(id); }
+
+  // ── PROGRESS ──
+  function startProgress() {
+    stopProgress();
+    if (!local.songStartTime) local.songStartTime = Date.now();
+    local.progressInterval = setInterval(tickProgress, 500);
+  }
+  function stopProgress() { if(local.progressInterval){clearInterval(local.progressInterval);local.progressInterval=null;} }
+
+  function tickProgress() {
+    let elapsed;
+    if (local.isHost && ytPlayer && ytPlayer.getCurrentTime && ytPlayer.getPlayerState&&ytPlayer.getPlayerState()===1) {
+      elapsed = ytPlayer.getCurrentTime();
+      const d = ytPlayer.getDuration(); if(d) local.songDuration=d;
+    } else {
+      elapsed = (Date.now()-local.songStartTime)/1000;
+    }
+    local.progress = Math.min((elapsed/local.songDuration)*100, 100);
+    document.getElementById('progress-fill').style.width = local.progress+'%';
+    const s=Math.floor(elapsed);
+    document.getElementById('progress-time').textContent=`${Math.floor(s/60)}:${(s%60).toString().padStart(2,'0')}`;
+    const t=Math.floor(local.songDuration);
+    document.getElementById('progress-total').textContent=`${Math.floor(t/60)}:${(t%60).toString().padStart(2,'0')}`;
+    const pts = local.progress<33?1:local.progress<66?2:3;
+    document.getElementById('points-preview').textContent=`+${pts} pts if survived`;
+    if (local.progress>=100&&local.isHost) hostComplete();
+  }
+
+  let _hostCompleteLock = false;
+  async function hostComplete() {
+    if (!local.isHost) return;
+    if (_hostCompleteLock) return;
+    _hostCompleteLock = true;
+    stopProgress();
+    const snap = await db.ref(`rooms/${local.roomCode}`).once('value');
+    if (!snap.exists()) return;
+    const room = snap.val();
+    if (!room.currentSong) return;
+
+    const djId = room.currentSong.submitterId;
+    const djName = room.currentSong.submitterName;
+    const players = room.players||{};
+    const submissions = room.submissions||{};
+    const updates = {};
+
+    // Award 3 pts for song completing
+    updates[`players/${djId}/score`] = (players[djId]?.score||0) + 3;
+    toast(`${djName}'s song played through! +3 pts`, 'green');
+
+    // Find earliest next submission if any
+    let nextWinnerId = null, earliest = Infinity;
+    for (const [pid, sub] of Object.entries(submissions)) {
+      if (sub.timestamp < earliest) { earliest = sub.timestamp; nextWinnerId = pid; }
+    }
+
+    if (nextWinnerId) {
+      const nextSub = submissions[nextWinnerId];
+      const nextPlayer = players[nextWinnerId];
+      const isConsecutive = nextWinnerId === djId;
+
+      if (isConsecutive) {
+        // Consecutive bonus — 6 pts instead of 3 (3 already awarded above, add 3 more)
+        updates[`players/${djId}/score`] = (players[djId]?.score||0) + 6;
+        toast(`${djName} goes again! +6 pts total`, 'green');
+      }
+
+      updates['currentSong'] = { link: nextSub.link, submitterId: nextWinnerId, submitterName: nextPlayer?.name||'?' };
+      updates['songStartedAt'] = firebase.database.ServerValue.TIMESTAMP;
+      updates['submissions'] = null;
+    } else {
+      updates['currentSong'] = null;
+      updates['songStartedAt'] = null;
+      updates['submissions'] = null;
+    }
+
+    await db.ref(`rooms/${local.roomCode}`).update(updates);
+    window._majorityTriggered = false;
+    window._firstSongTriggered = false;
+    // Release lock after a short delay so Firebase has time to propagate
+    setTimeout(() => { _hostCompleteLock = false; }, 3000);
+  }
+
+  // ── HOST CONTROLS ──
+  window.hostSkipSong = async function() {
+    if (!local.isHost) return;
+    await db.ref(`rooms/${local.roomCode}`).update({ currentSong:null, songStartedAt:null, submissions:null });
+    if (ytPlayer&&ytPlayer.stopVideo) ytPlayer.stopVideo();
+    window._majorityTriggered=false; window._firstSongTriggered=false;
+    toast('Song skipped');
+  };
+
+  window.hostResetScores = async function() {
+    if (!local.isHost) return;
+    const snap = await db.ref(`rooms/${local.roomCode}/players`).once('value');
+    if (!snap.exists()) return;
+    const updates = {};
+    Object.keys(snap.val()).forEach(pid => updates[`${pid}/score`]=0);
+    await db.ref(`rooms/${local.roomCode}/players`).update(updates);
+    toast('Scores reset');
+  };
+
+  // ── TOAST ──
+  window.toast = function(msg, type='') {
+    const wrap = document.getElementById('toast-container');
+    const el = document.createElement('div');
+    el.className=`toast ${type}`; el.textContent=msg;
+    wrap.appendChild(el); setTimeout(()=>el.remove(),3000);
+  };
+</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&display=swap');
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#f7f6f3;--surface:#fff;--border:#e8e6e0;--text:#1a1916;--text-2:#7a7770;--text-3:#b0aea8;--green:#2d6a4f;--green-bg:#edf7f2;--red:#c0392b;--red-bg:#fdf0ee;--amber:#b45309;--amber-bg:#fef9ee;--radius:12px;--radius-sm:8px}
+  html[data-theme="dark"]{--bg:#111110;--surface:#1c1c1a;--border:#2e2e2b;--text:#f0ede8;--text-2:#8a8780;--text-3:#4a4845;--green:#3a8f68;--green-bg:#0e2419;--red:#e05444;--red-bg:#2a1210;--amber:#d4810a;--amber-bg:#271a05}
+  body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;line-height:1.5;transition:background .2s,color .2s}
+  /* LANDING */
+  #landing{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:24px;gap:48px}
+  .wordmark{font-family:'DM Mono',monospace;font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-2)}
+  .landing-cards{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;max-width:560px;width:100%}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;flex:1;min-width:220px}
+  .card h2{font-size:15px;font-weight:500;margin-bottom:6px}
+  .card p{font-size:13px;color:var(--text-2);margin-bottom:20px;line-height:1.6}
+  /* BUTTONS */
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 18px;border-radius:var(--radius-sm);font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:opacity .15s,transform .1s;width:100%}
+  .btn:active{transform:scale(.98)}
+  .btn-dark{background:var(--text);color:#fff}.btn-dark:hover{opacity:.85}
+  .btn-outline{background:transparent;color:var(--text);border:1px solid var(--border)}.btn-outline:hover{background:var(--bg)}
+  .btn-sm{padding:7px 14px;font-size:12px;width:auto}
+  input[type=text]{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-family:'DM Sans',sans-serif;font-size:13px;background:var(--bg);color:var(--text);outline:none;transition:border-color .15s;margin-bottom:10px}
+  input[type=text]:focus{border-color:var(--text)}
+  input[type=text]::placeholder{color:var(--text-3)}
+  /* APP */
+  #app{display:none}
+  .app-shell{display:grid;grid-template-columns:1fr;max-width:1100px;margin:0 auto;padding:20px;gap:16px}
+  @media(min-width:700px){.app-shell{grid-template-columns:1fr 320px;padding:24px}}
+  /* HEADER */
+  .app-header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);flex-wrap:wrap;gap:10px}
+  .room-info{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .room-code{font-family:'DM Mono',monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);padding:4px 10px;border-radius:6px;color:var(--text-2);letter-spacing:.08em}
+  .share-hint{font-size:12px;color:var(--text-3)}
+  .avatar{width:28px;height:28px;border-radius:50%;border:2px solid var(--surface);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;margin-left:-6px;color:#fff}
+  .avatar:first-child{margin-left:0}
+  .avatar-sm{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#fff;flex-shrink:0}
+  #avatar-row{display:flex}
+  .section-label{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--text-3);margin-bottom:4px}
+  /* NOW PLAYING */
+  .now-playing{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;display:flex;flex-direction:column;gap:20px}
+  .no-song-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:40px 20px;text-align:center;color:var(--text-3);min-height:160px}
+  #song-state{display:none;flex-direction:column;gap:20px}
+  #yt-player-wrap{width:100%;aspect-ratio:16/9;border-radius:8px;overflow:hidden;background:#000;display:none}
+  #yt-player{width:100%;height:100%}
+  .song-display{display:flex;gap:16px;align-items:flex-start}
+  .album-art{width:72px;height:72px;border-radius:8px;background:var(--bg);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:28px;position:relative;overflow:hidden}
+  .album-art::after{content:'';position:absolute;inset:0;border-radius:8px;border:2px solid var(--text);animation:pulse-border 2s ease-in-out infinite}
+  @keyframes pulse-border{0%,100%{opacity:.1}50%{opacity:.4}}
+  .song-meta{flex:1;min-width:0}
+  .song-title{font-size:16px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .song-submitter{font-size:13px;color:var(--text-2);margin-top:2px}
+  .song-link{font-family:'DM Mono',monospace;font-size:11px;color:var(--text-3);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+  /* PROGRESS */
+  .progress-wrap{display:flex;flex-direction:column;gap:8px}
+  .progress-bar-bg{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+  .progress-bar-fill{height:100%;background:var(--text);border-radius:2px;transition:width .5s linear}
+  .progress-meta{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--text-2)}
+  .points-preview{font-family:'DM Mono',monospace;font-size:11px;padding:2px 8px;border-radius:4px;background:var(--amber-bg);color:var(--amber)}
+  /* TENSION */
+  @keyframes dot-pulse{from{transform:scale(1)}to{transform:scale(1.4)}}
+  /* SIDEBAR */
+  .sidebar{display:flex;flex-direction:column;gap:16px}
+  .my-submission{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+  .submit-area{display:flex;flex-direction:column;gap:10px}
+  .submitted-state{display:none;flex-direction:column;gap:10px}
+  .submitted-badge{display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--green-bg);border:1px solid #b7e4cc;border-radius:var(--radius-sm);font-size:13px;color:var(--green);font-weight:500}
+  .submitted-link{font-family:'DM Mono',monospace;font-size:11px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .leaderboard{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+  .player-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
+  .player-row:last-child{border-bottom:none}
+  .player-rank{font-family:'DM Mono',monospace;font-size:11px;color:var(--text-3);width:16px;text-align:center}
+  .player-name{flex:1;font-size:13px}
+  .player-name.is-you{font-weight:500}
+  .player-name.is-you::after{content:' (you)';font-weight:300;color:var(--text-2)}
+  .player-score{font-family:'DM Mono',monospace;font-size:13px;font-weight:500}
+  .remove-btn{background:none;border:none;color:var(--text-3);cursor:pointer;font-size:12px;padding:2px 4px;border-radius:4px;line-height:1;transition:color .15s,background .15s}
+  .remove-btn:hover{color:var(--red);background:var(--red-bg)}
+  .theme-btn{background:none;border:none;cursor:pointer;font-size:18px;padding:4px;line-height:1;color:var(--text-2);transition:color .15s}
+  .theme-btn:hover{color:var(--text)}
+  .host-panel{grid-column:1/-1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+  .host-panel h3{font-size:13px;font-weight:500;margin-bottom:12px}
+  .host-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .status-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:500}
+  .status-chip.live{background:var(--red-bg);color:var(--red)}
+  .status-chip.waiting{background:var(--amber-bg);color:var(--amber)}
+  .dot-blink{width:6px;height:6px;border-radius:50%;background:currentColor;animation:blink 1.2s ease-in-out infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+  #toast-container{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:100;pointer-events:none}
+  .toast{background:var(--text);color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;white-space:nowrap;animation:toast-in .2s ease,toast-out .3s ease 2.5s forwards}
+  .toast.green{background:var(--green)}.toast.red{background:var(--red)}
+  @keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes toast-out{from{opacity:1}to{opacity:0}}
+  .yt-music-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:6px;background:#ff0000;color:#fff;font-size:12px;font-weight:500;text-decoration:none;transition:opacity .15s}
+  .yt-music-btn:hover{opacity:.85}
+  .interrupt-flash{display:none;position:fixed;inset:0;background:rgba(192,57,43,.07);z-index:50;pointer-events:none;animation:flash .5s ease forwards}
+  @keyframes flash{0%{opacity:1}100%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="landing">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.04</span></div>
+    <button class="theme-btn" id="theme-toggle-landing" onclick="toggleTheme()" title="Toggle dark mode">☀️</button>
+  </div>
+  <div class="landing-cards">
+    <div class="card">
+      <h2>Host a room</h2>
+      <p>Start a session and share the room code with friends.</p>
+      <input type="text" id="host-name" placeholder="Your name" />
+      <button class="btn btn-dark" onclick="hostRoom()">Create room →</button>
+    </div>
+    <div class="card">
+      <h2>Join a room</h2>
+      <p>Enter the code your host shared with you.</p>
+      <input type="text" id="join-name" placeholder="Your name" />
+      <input type="text" id="join-code" placeholder="Room code" style="text-transform:uppercase" />
+      <button class="btn btn-outline" onclick="joinRoom()">Join room →</button>
+    </div>
+  </div>
+</div>
+
+<div id="app">
+  <div class="app-shell">
+    <div class="app-header">
+      <div class="room-info">
+        <span class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.04</span></span>
+        <span class="room-code" id="header-code"></span>
+        <span class="share-hint">share this code to invite friends</span>
+        <div id="status-chip-wrap"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <div id="avatar-row"></div>
+        <button class="btn btn-outline btn-sm" id="host-btn" style="display:none" onclick="toggleHostPanel()">⚙ Host</button>
+        <button class="btn btn-outline btn-sm" id="leave-btn" style="display:none" onclick="leaveRoom()">Leave</button>
+        <button class="btn btn-outline btn-sm" id="copy-link-btn" style="display:none" onclick="copyLink()" title="Copy invite link">🔗 Copy link</button>
+        <button class="theme-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">☀️</button>
+      </div>
+    </div>
+
+    <div class="now-playing">
+      <div class="section-label">Now playing</div>
+      <div class="no-song-state" id="no-song-state">
+        <div style="font-size:32px">♫</div>
+        <div style="font-size:14px;color:var(--text-2)">Waiting for the first song…</div>
+        <div style="font-size:12px">Submit a YouTube link to kick things off</div>
+      </div>
+      <div id="song-state">
+        <div id="yt-player-wrap"><div id="yt-player"></div></div>
+        <div class="song-display">
+          <div class="album-art" id="album-art" style="display:none">♪</div>
+          <div class="song-meta">
+            <div class="song-title" id="song-title">—</div>
+            <div class="song-submitter" id="song-submitter"></div>
+            <a class="song-link" id="song-link" href="#" target="_blank"></a>
+            <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+              <a id="yt-music-btn" href="#" target="_blank" class="yt-music-btn" style="display:none">
+                ♥ Open in YouTube Music
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="progress-wrap">
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-fill" style="width:0%"></div></div>
+          <div class="progress-meta">
+            <span id="progress-time">0:00</span>
+            <span class="points-preview" id="points-preview">+0 pts</span>
+            <span id="progress-total">0:00</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar">
+      <div class="my-submission">
+        <div class="section-label">My pick</div>
+        <div class="submit-area" id="submit-area">
+          <input type="text" id="link-input" placeholder="Paste a YouTube link…" />
+          <button class="btn btn-dark" onclick="submitSong()">Lock in ↵</button>
+        </div>
+        <div class="submitted-state" id="submitted-state">
+          <div class="submitted-badge">✓ Locked in</div>
+          <div class="submitted-link" id="submitted-link-display"></div>
+          <button class="btn btn-outline btn-sm" onclick="cancelSubmission()" style="width:100%">Change pick</button>
+        </div>
+      </div>
+      <div class="leaderboard">
+        <div class="section-label">Players</div>
+        <div id="player-list"><div style="color:var(--text-3);font-size:13px;padding:12px 0">Waiting for players…</div></div>
+      </div>
+    </div>
+
+    <div class="host-panel" id="host-panel" style="display:none">
+      <h3>Host controls</h3>
+      <div class="host-actions">
+        <button class="btn btn-outline btn-sm" onclick="hostSkipSong()">⏭ Skip song</button>
+        <button class="btn btn-outline btn-sm" onclick="hostResetScores()">↺ Reset scores</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="interrupt-flash" id="interrupt-flash"></div>
+<div id="toast-container"></div>
+
+<script>
+  // ── THEME ──
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('lp_theme', theme);
+    const icon = theme === 'dark' ? '☀️' : '🌙';
+    const t1 = document.getElementById('theme-toggle');
+    const t2 = document.getElementById('theme-toggle-landing');
+    if (t1) t1.textContent = icon;
+    if (t2) t2.textContent = icon;
+  }
+  function toggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    applyTheme(current === 'dark' ? 'light' : 'dark');
+  }
+  // Default to dark, respect saved preference
+  applyTheme(localStorage.getItem('lp_theme') || 'dark');
+
+  let hostPanelOpen = false;
+  function toggleHostPanel() {
+    hostPanelOpen = !hostPanelOpen;
+    document.getElementById('host-panel').style.display = hostPanelOpen ? 'block' : 'none';
+  }
+</script>
+</body>
+</html>
+    initApp();
+    toast('Reconnected ✓', 'green');
+    return true;
+  }
+
+  // ── LANDING ──
+  window.hostRoom = async function() {
+    const name = document.getElementById('host-name').value.trim();
+    if (!name) { toast('Enter your name first','red'); return; }
+    const code = genCode();
+    const pid = genId();
+    local.roomCode = code; local.playerId = pid; local.playerName = name; local.isHost = true;
+    await db.ref(`rooms/${code}`).set({ code, hostId:pid, createdAt: firebase.database.ServerValue.TIMESTAMP, currentSong:null, songStartedAt:null });
+    await db.ref(`rooms/${code}/players/${pid}`).set({ name, score:0, color:COLORS[0], joinedAt: firebase.database.ServerValue.TIMESTAMP });
+    saveSession();
     initApp();
   };
 
