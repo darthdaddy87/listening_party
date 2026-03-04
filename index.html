@@ -158,10 +158,11 @@
       }
       if (song && sc < maj) window._majorityTriggered = false;
 
-      // First song — all players count (no DJ yet)
+      // No current song — either first song or between songs
+      // Only trigger if hostComplete is not mid-flight (lock)
       const scAll = Object.keys(submissions).length;
       const majAll = Math.ceil(pc / 2);
-      if (!song && scAll >= majAll && !window._firstSongTriggered) {
+      if (!song && scAll >= majAll && !window._firstSongTriggered && !_hostCompleteLock) {
         window._firstSongTriggered = true;
         setTimeout(() => triggerCut(players, submissions, null), 800);
       }
@@ -378,8 +379,11 @@
     if (local.progress>=100&&local.isHost) hostComplete();
   }
 
+  let _hostCompleteLock = false;
   async function hostComplete() {
     if (!local.isHost) return;
+    if (_hostCompleteLock) return;
+    _hostCompleteLock = true;
     stopProgress();
     const snap = await db.ref(`rooms/${local.roomCode}`).once('value');
     if (!snap.exists()) return;
@@ -425,6 +429,8 @@
     await db.ref(`rooms/${local.roomCode}`).update(updates);
     window._majorityTriggered = false;
     window._firstSongTriggered = false;
+    // Release lock after a short delay so Firebase has time to propagate
+    setTimeout(() => { _hostCompleteLock = false; }, 3000);
   }
 
   // ── HOST CONTROLS ──
