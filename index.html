@@ -146,10 +146,9 @@
       const pc = Object.keys(players).length;
       const djId = song ? song.submitterId : null;
 
-      // Only non-DJ submissions count toward the cut threshold
+      // Non-DJ submissions count toward threshold, threshold is majority of ALL players
       const nonDjSubmissions = Object.keys(submissions).filter(pid => pid !== djId);
-      const nonDjPlayers = pc - (djId ? 1 : 0);
-      const maj = Math.ceil(nonDjPlayers / 2);
+      const maj = Math.ceil(pc / 2);
       const sc = nonDjSubmissions.length;
 
       if (song && sc >= maj && !window._majorityTriggered) {
@@ -286,19 +285,34 @@
 
     const ytId = extractYouTubeId(song.link);
     if (ytId) {
-      document.getElementById('yt-player-wrap').style.display = 'block';
-      document.getElementById('album-art').style.display = 'none';
-      document.getElementById('song-title').textContent = 'Loading…';
+      // Only host sees the video player
       if (local.isHost) {
+        document.getElementById('yt-player-wrap').style.display = 'block';
+        document.getElementById('album-art').style.display = 'none';
         if (ytReady && ytPlayer && ytPlayer.loadVideoById) loadYTVideo(ytId);
         else local.pendingVideoId = ytId;
       } else {
+        document.getElementById('yt-player-wrap').style.display = 'none';
+        document.getElementById('album-art').style.display = 'flex';
         local.songStartTime = songStartedAt ? Date.now() - (Date.now() - songStartedAt) : Date.now();
         startProgress();
       }
+      document.getElementById('song-title').textContent = 'Loading…';
       fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(song.link)}&format=json`)
-        .then(r=>r.json()).then(d=>{ document.getElementById('song-title').textContent = d.title||'YouTube Track'; })
-        .catch(()=>{ document.getElementById('song-title').textContent = 'YouTube Track'; });
+        .then(r=>r.json()).then(d=>{
+          const title = d.title||'YouTube Track';
+          document.getElementById('song-title').textContent = title;
+          // Update YouTube Music deep link
+          const ytBtn = document.getElementById('yt-music-btn');
+          ytBtn.href = `https://music.youtube.com/search?q=${encodeURIComponent(title)}`;
+          ytBtn.style.display = 'inline-flex';
+        })
+        .catch(()=>{
+          document.getElementById('song-title').textContent = 'YouTube Track';
+          const ytBtn = document.getElementById('yt-music-btn');
+          ytBtn.href = `https://music.youtube.com/search?q=${encodeURIComponent(song.link)}`;
+          ytBtn.style.display = 'inline-flex';
+        });
     } else {
       document.getElementById('yt-player-wrap').style.display = 'none';
       document.getElementById('album-art').style.display = 'flex';
@@ -315,6 +329,7 @@
     document.getElementById('song-state').style.display = 'none';
     document.getElementById('yt-player-wrap').style.display = 'none';
     document.getElementById('progress-fill').style.width = '0%';
+    document.getElementById('yt-music-btn').style.display = 'none';
   }
 
   // ── YOUTUBE ──
@@ -547,13 +562,15 @@
   .toast.green{background:var(--green)}.toast.red{background:var(--red)}
   @keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
   @keyframes toast-out{from{opacity:1}to{opacity:0}}
+  .yt-music-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:6px;background:#ff0000;color:#fff;font-size:12px;font-weight:500;text-decoration:none;transition:opacity .15s}
+  .yt-music-btn:hover{opacity:.85}
   .interrupt-flash{display:none;position:fixed;inset:0;background:rgba(192,57,43,.07);z-index:50;pointer-events:none;animation:flash .5s ease forwards}
   @keyframes flash{0%{opacity:1}100%{opacity:0}}
 </style>
 </head>
 <body>
 <div id="landing">
-  <div class="wordmark">Listening Party</div>
+  <div class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.02</span></div>
   <div class="landing-cards">
     <div class="card">
       <h2>Host a room</h2>
@@ -575,7 +592,7 @@
   <div class="app-shell">
     <div class="app-header">
       <div class="room-info">
-        <span class="wordmark">Listening Party</span>
+        <span class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.02</span></span>
         <span class="room-code" id="header-code"></span>
         <span class="share-hint">share this code to invite friends</span>
         <div id="status-chip-wrap"></div>
@@ -602,6 +619,11 @@
             <div class="song-title" id="song-title">—</div>
             <div class="song-submitter" id="song-submitter"></div>
             <a class="song-link" id="song-link" href="#" target="_blank"></a>
+            <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+              <a id="yt-music-btn" href="#" target="_blank" class="yt-music-btn" style="display:none">
+                ♥ Open in YouTube Music
+              </a>
+            </div>
           </div>
         </div>
         <div class="progress-wrap">
@@ -654,5 +676,6 @@
     document.getElementById('host-panel').style.display = hostPanelOpen ? 'block' : 'none';
   }
 </script>
+  <div style="position:fixed;bottom:8px;left:12px;font-family:monospace;font-size:11px;color:#b0aea8;pointer-events:none;z-index:9999;letter-spacing:0.05em;">v1.01</div>
 </body>
 </html>
