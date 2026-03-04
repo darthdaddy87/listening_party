@@ -532,7 +532,7 @@
   /* BUTTONS */
   .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 18px;border-radius:var(--radius-sm);font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:opacity .15s,transform .1s;width:100%}
   .btn:active{transform:scale(.98)}
-  .btn-dark{background:var(--text);color:#fff}.btn-dark:hover{opacity:.85}
+  .btn-dark{background:var(--text);color:var(--bg)}.btn-dark:hover{opacity:.85}
   .btn-outline{background:transparent;color:var(--text);border:1px solid var(--border)}.btn-outline:hover{background:var(--bg)}
   .btn-sm{padding:7px 14px;font-size:12px;width:auto}
   input[type=text]{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-family:'DM Sans',sans-serif;font-size:13px;background:var(--bg);color:var(--text);outline:none;transition:border-color .15s;margin-bottom:10px}
@@ -591,8 +591,9 @@
   .player-score{font-family:'DM Mono',monospace;font-size:13px;font-weight:500}
   .remove-btn{background:none;border:none;color:var(--text-3);cursor:pointer;font-size:12px;padding:2px 4px;border-radius:4px;line-height:1;transition:color .15s,background .15s}
   .remove-btn:hover{color:var(--red);background:var(--red-bg)}
-  .theme-btn{background:none;border:none;cursor:pointer;font-size:18px;padding:4px;line-height:1;color:var(--text-2);transition:color .15s}
-  .theme-btn:hover{color:var(--text)}
+  .theme-btn{background:var(--text);border:none;cursor:pointer;width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;padding:0;transition:opacity .15s;flex-shrink:0}
+  .theme-btn:hover{opacity:.85}
+  .theme-btn svg{width:16px;height:16px;fill:var(--bg);display:block}
   .host-panel{grid-column:1/-1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
   .host-panel h3{font-size:13px;font-weight:500;margin-bottom:12px}
   .host-actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -615,8 +616,8 @@
 <body>
 <div id="landing">
   <div style="display:flex;align-items:center;gap:12px;">
-    <div class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.04</span></div>
-    <button class="theme-btn" id="theme-toggle-landing" onclick="toggleTheme()" title="Toggle dark mode">☀️</button>
+    <div class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.05</span></div>
+    <button class="theme-btn" id="theme-toggle-landing" onclick="toggleTheme()" title="Toggle dark mode"></button>
   </div>
   <div class="landing-cards">
     <div class="card">
@@ -639,7 +640,7 @@
   <div class="app-shell">
     <div class="app-header">
       <div class="room-info">
-        <span class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.04</span></span>
+        <span class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.05</span></span>
         <span class="room-code" id="header-code"></span>
         <span class="share-hint">share this code to invite friends</span>
         <div id="status-chip-wrap"></div>
@@ -649,7 +650,7 @@
         <button class="btn btn-outline btn-sm" id="host-btn" style="display:none" onclick="toggleHostPanel()">⚙ Host</button>
         <button class="btn btn-outline btn-sm" id="leave-btn" style="display:none" onclick="leaveRoom()">Leave</button>
         <button class="btn btn-outline btn-sm" id="copy-link-btn" style="display:none" onclick="copyLink()" title="Copy invite link">🔗 Copy link</button>
-        <button class="theme-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">☀️</button>
+        <button class="theme-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode"></button>
       </div>
     </div>
 
@@ -720,14 +721,18 @@
 
 <script>
   // ── THEME ──
+  const SUN_ICON = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="5"/><line x1="12" y1="2" x2="12" y2="4" stroke-width="2" stroke="currentColor" stroke-linecap="round"/><line x1="12" y1="20" x2="12" y2="22" stroke-width="2" stroke="currentColor" stroke-linecap="round"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" stroke-width="2" stroke="currentColor" stroke-linecap="round"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" stroke-width="2" stroke="currentColor" stroke-linecap="round"/><line x1="2" y1="12" x2="4" y2="12" stroke-width="2" stroke="currentColor" stroke-linecap="round"/><line x1="20" y1="12" x2="22" y2="12" stroke-width="2" stroke="currentColor" stroke-linecap="round"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" stroke-width="2" stroke="currentColor" stroke-linecap="round"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" stroke-width="2" stroke="currentColor" stroke-linecap="round"/></svg>`;
+  const MOON_ICON = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`;
+
   function applyTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('lp_theme', theme);
-    const icon = theme === 'dark' ? '☀️' : '🌙';
+    // In dark mode show sun (to switch to light), in light mode show moon (to switch to dark)
+    const icon = theme === 'dark' ? SUN_ICON : MOON_ICON;
     const t1 = document.getElementById('theme-toggle');
     const t2 = document.getElementById('theme-toggle-landing');
-    if (t1) t1.textContent = icon;
-    if (t2) t2.textContent = icon;
+    if (t1) t1.innerHTML = icon;
+    if (t2) t2.innerHTML = icon;
   }
   function toggleTheme() {
     const current = document.documentElement.getAttribute('data-theme') || 'dark';
