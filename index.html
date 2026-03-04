@@ -32,6 +32,7 @@
       roomCode: local.roomCode, playerId: local.playerId,
       playerName: local.playerName, isHost: local.isHost,
       hostOnly: local.hostOnly || false,
+      isRemote: local.isRemote || false,
       score: score !== undefined ? score : (local.lastScore || 0)
     }));
   }
@@ -53,6 +54,7 @@
     local.playerName = session.playerName;
     local.isHost = room.hostId === session.playerId;
     local.hostOnly = room.hostOnly || session.hostOnly || false;
+    local.isRemote = session.isRemote || false;
 
     // Re-write player slot if it was dropped (tab closed, onDisconnect fired, etc.)
     const playerSnap = await db.ref(`rooms/${session.roomCode}/players/${session.playerId}`).once('value');
@@ -94,12 +96,14 @@
   window.joinRoom = async function() {
     const name = document.getElementById('join-name').value.trim();
     const code = document.getElementById('join-code').value.trim().toUpperCase();
+    const remote = document.getElementById('remote-toggle').checked;
     if (!name) { toast('Enter your name first','red'); return; }
     if (!code) { toast('Enter a room code','red'); return; }
     const snap = await db.ref(`rooms/${code}`).once('value');
     if (!snap.exists()) { toast('Room not found — check the code','red'); return; }
     const pid = genId();
-    local.roomCode = code; local.playerId = pid; local.playerName = name; local.isHost = false;
+    local.roomCode = code; local.playerId = pid; local.playerName = name;
+    local.isHost = false; local.isRemote = remote;
     const players = snap.val().players || {};
     const taken = Object.values(players).map(p => p.color);
     const color = COLORS.find(c => !taken.includes(c)) || COLORS[0];
@@ -348,8 +352,8 @@
 
     const ytId = extractYouTubeId(song.link);
     if (ytId) {
-      // Only host sees the video player
-      if (local.isHost) {
+      // Host and remote players get the YouTube player; in-room players see title only
+      if (local.isHost || local.isRemote) {
         document.getElementById('yt-player-wrap').style.display = 'block';
         document.getElementById('album-art').style.display = 'none';
         if (ytReady && ytPlayer && ytPlayer.loadVideoById) loadYTVideo(ytId);
@@ -399,6 +403,7 @@
   let ytPlayer = null, ytReady = false;
 
   function initYouTube() {
+    if (!local.isHost && !local.isRemote) return; // only host and remote players need YT
     if (window.YT && window.YT.Player) createYTPlayer();
     else window.onYouTubeIframeAPIReady = createYTPlayer;
   }
@@ -639,6 +644,18 @@
   @keyframes toast-out{from{opacity:1}to{opacity:0}}
   .yt-music-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:6px;background:#ff0000;color:#fff;font-size:12px;font-weight:500;text-decoration:none;transition:opacity .15s}
   .yt-music-btn:hover{opacity:.85}
+  .scoring-guide{grid-column:1/-1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;margin-bottom:40px}
+  .scoring-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px;margin-bottom:16px}
+  .scoring-block{display:flex;flex-direction:column;gap:6px}
+  .scoring-title{font-size:12px;font-weight:500;color:var(--text-2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;font-family:'DM Mono',monospace}
+  .scoring-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:var(--text-2);gap:8px}
+  .scoring-row span:first-child{flex:1}
+  .pts{font-family:'DM Mono',monospace;font-size:12px;font-weight:500;white-space:nowrap;padding:2px 8px;border-radius:4px}
+  .pts.green{background:var(--green-bg);color:var(--green)}
+  .pts.red{background:var(--red-bg);color:var(--red)}
+  .pts.split{background:var(--amber-bg);color:var(--amber)}
+  .pts.neutral{background:var(--border);color:var(--text-2)}
+  .scoring-note{font-size:12px;color:var(--text-3);line-height:1.6;border-top:1px solid var(--border);padding-top:12px;margin-top:4px}
   .interrupt-flash{display:none;position:fixed;inset:0;background:rgba(192,57,43,.07);z-index:50;pointer-events:none;animation:flash .5s ease forwards}
   @keyframes flash{0%{opacity:1}100%{opacity:0}}
 </style>
@@ -668,6 +685,13 @@
       <p>Enter the code your host shared with you.</p>
       <input type="text" id="join-name" placeholder="Your name" />
       <input type="text" id="join-code" placeholder="Room code" style="text-transform:uppercase" />
+      <div class="toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="remote-toggle" />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          <span>Remote player <span style="color:var(--text-3);font-size:12px;">— plays audio on this device</span></span>
+        </label>
+      </div>
       <button class="btn btn-outline" onclick="joinRoom()">Join room →</button>
     </div>
   </div>
@@ -758,13 +782,46 @@
         <button class="btn btn-outline btn-sm" onclick="hostResetScores()">↺ Reset scores</button>
       </div>
     </div>
+
+    <!-- SCORING GUIDE -->
+    <div class="scoring-guide">
+      <div class="section-label" style="margin-bottom:12px">How scoring works</div>
+      <div class="scoring-grid">
+        <div class="scoring-block">
+          <div class="scoring-title">Cutting a song</div>
+          <div class="scoring-row"><span>Cut before 66%</span><span class="pts green">Cutter +3</span></div>
+          <div class="scoring-row"><span>Cut at 66–90%</span><span class="pts split">Cutter +2 &nbsp;·&nbsp; DJ +1</span></div>
+          <div class="scoring-row"><span>Cut after 90%</span><span class="pts split">Cutter +1 &nbsp;·&nbsp; DJ +2</span></div>
+        </div>
+        <div class="scoring-block">
+          <div class="scoring-title">Surviving</div>
+          <div class="scoring-row"><span>Song plays all the way through</span><span class="pts green">DJ +3</span></div>
+          <div class="scoring-row"><span>Your song plays again next</span><span class="pts green">DJ +6 total</span></div>
+        </div>
+        <div class="scoring-block">
+          <div class="scoring-title">Cutting your own song</div>
+          <div class="scoring-row"><span>You submitted and your pick wins</span><span class="pts red">You −3</span></div>
+          <div class="scoring-row"><span>Everyone else with a pick queued</span><span class="pts green">Each +3</span></div>
+        </div>
+        <div class="scoring-block">
+          <div class="scoring-title">Cut trigger</div>
+          <div class="scoring-row"><span>2 players</span><span class="pts neutral">1 non-DJ vote</span></div>
+          <div class="scoring-row"><span>3–4 players</span><span class="pts neutral">2 non-DJ votes</span></div>
+          <div class="scoring-row"><span>5–6 players</span><span class="pts neutral">3 non-DJ votes</span></div>
+          <div class="scoring-row"><span>7–8 players</span><span class="pts neutral">4 non-DJ votes</span></div>
+          <div class="scoring-row"><span>9–10 players</span><span class="pts neutral">5 non-DJ votes</span></div>
+        </div>
+      </div>
+      <p class="scoring-note">The DJ's own queued song never counts toward the cut threshold — only other players' submissions matter. The earliest submission wins when majority is reached.</p>
+    </div>
+
   </div>
 </div>
 
 <div class="interrupt-flash" id="interrupt-flash"></div>
 <div id="toast-container"></div>
 <a href="https://www.linkedin.com/in/duaneharper/" target="_blank" style="position:fixed;bottom:10px;left:14px;font-size:11px;color:var(--text-3);text-decoration:none;font-family:'DM Sans',sans-serif;z-index:9999;transition:color .15s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-3)'">Imagined by Duane Harper</a>
-<div style="position:fixed;bottom:10px;right:14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--text-3);z-index:9999;">v1.08</div>
+<div style="position:fixed;bottom:10px;right:14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--text-3);z-index:9999;">v1.5</div>
 
 <script>
   // ── THEME ──
