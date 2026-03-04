@@ -26,6 +26,33 @@
   function genId() { return Math.random().toString(36).substring(2,10); }
   function genCode() { return Math.random().toString(36).substring(2,7).toUpperCase(); }
 
+  // ── SESSION PERSISTENCE ──
+  function saveSession() {
+    localStorage.setItem('lp_session', JSON.stringify({
+      roomCode: local.roomCode, playerId: local.playerId,
+      playerName: local.playerName, isHost: local.isHost
+    }));
+  }
+  function clearSession() { localStorage.removeItem('lp_session'); }
+
+  async function tryAutoReconnect() {
+    const raw = localStorage.getItem('lp_session');
+    if (!raw) return false;
+    let session;
+    try { session = JSON.parse(raw); } catch(e) { clearSession(); return false; }
+    const snap = await db.ref(`rooms/${session.roomCode}/players/${session.playerId}`).once('value');
+    if (!snap.exists()) { clearSession(); return false; }
+    local.roomCode = session.roomCode;
+    local.playerId = session.playerId;
+    local.playerName = session.playerName;
+    local.isHost = session.isHost;
+    const roomSnap = await db.ref(`rooms/${session.roomCode}`).once('value');
+    if (roomSnap.exists()) local.isHost = roomSnap.val().hostId === local.playerId;
+    initApp();
+    toast('Reconnected ✓', 'green');
+    return true;
+  }
+
   // ── LANDING ──
   window.hostRoom = async function() {
     const name = document.getElementById('host-name').value.trim();
@@ -35,6 +62,7 @@
     local.roomCode = code; local.playerId = pid; local.playerName = name; local.isHost = true;
     await db.ref(`rooms/${code}`).set({ code, hostId:pid, createdAt: firebase.database.ServerValue.TIMESTAMP, currentSong:null, songStartedAt:null });
     await db.ref(`rooms/${code}/players/${pid}`).set({ name, score:0, color:COLORS[0], joinedAt: firebase.database.ServerValue.TIMESTAMP });
+    saveSession();
     initApp();
   };
 
@@ -51,9 +79,11 @@
     const taken = Object.values(players).map(p => p.color);
     const color = COLORS.find(c => !taken.includes(c)) || COLORS[0];
     await db.ref(`rooms/${code}/players/${pid}`).set({ name, score:0, color, joinedAt: firebase.database.ServerValue.TIMESTAMP });
-    db.ref(`rooms/${code}/players/${pid}`).onDisconnect().remove();
+    saveSession();
     initApp();
   };
+
+  window.leaveRoom = function() { clearSession(); location.reload(); };
 
   // ── INIT ──
   function initApp() {
@@ -61,10 +91,12 @@
     document.getElementById('app').style.display = 'block';
     document.getElementById('header-code').textContent = local.roomCode;
     if (local.isHost) document.getElementById('host-btn').style.display = 'inline-flex';
-    db.ref(`rooms/${local.roomCode}/players/${local.playerId}`).onDisconnect().remove();
+    document.getElementById('leave-btn').style.display = 'inline-flex';
     subscribeToRoom();
     initYouTube();
   }
+
+  tryAutoReconnect();
 
   // ── SUBSCRIBE ──
   let prevSongKey = null;
@@ -128,8 +160,16 @@
         <div class="player-name ${pid===local.playerId?'is-you':''}">${p.name}</div>
         <div class="player-submitted ${submissions[pid]?'active':''}"></div>
         <div class="player-score">${p.score}</div>
+        ${local.isHost && pid !== local.playerId ? `<button class="remove-btn" onclick="hostRemovePlayer('${pid}')">✕</button>` : ''}
       </div>`).join('');
   }
+
+  window.hostRemovePlayer = async function(pid) {
+    if (!local.isHost) return;
+    await db.ref(`rooms/${local.roomCode}/players/${pid}`).remove();
+    await db.ref(`rooms/${local.roomCode}/submissions/${pid}`).remove();
+    toast('Player removed');
+  };
 
   function renderTensionDots(players, submissions) {
     const n = Object.keys(players).length;
@@ -434,6 +474,8 @@
   .player-score{font-family:'DM Mono',monospace;font-size:13px;font-weight:500}
   .player-submitted{width:8px;height:8px;border-radius:50%;background:var(--border);transition:background .3s}
   .player-submitted.active{background:var(--green)}
+  .remove-btn{background:none;border:none;color:var(--text-3);cursor:pointer;font-size:12px;padding:2px 4px;border-radius:4px;line-height:1;transition:color .15s,background .15s}
+  .remove-btn:hover{color:var(--red);background:var(--red-bg)}
   .host-panel{grid-column:1/-1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
   .host-panel h3{font-size:13px;font-weight:500;margin-bottom:12px}
   .host-actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -483,6 +525,7 @@
       <div style="display:flex;align-items:center;gap:10px">
         <div id="avatar-row"></div>
         <button class="btn btn-outline btn-sm" id="host-btn" style="display:none" onclick="toggleHostPanel()">⚙ Host</button>
+        <button class="btn btn-outline btn-sm" id="leave-btn" style="display:none" onclick="leaveRoom()">Leave</button>
       </div>
     </div>
 
