@@ -100,7 +100,14 @@
     initApp();
   };
 
-  window.leaveRoom = function() { clearSession(); location.reload(); };
+  window.leaveRoom = async function() {
+    if (local.playerId && local.roomCode) {
+      await db.ref(`rooms/${local.roomCode}/players/${local.playerId}`).remove();
+      await db.ref(`rooms/${local.roomCode}/submissions/${local.playerId}`).remove();
+    }
+    clearSession();
+    location.reload();
+  };
 
   // ── INIT ──
   function initApp() {
@@ -146,10 +153,9 @@
       const pc = Object.keys(players).length;
       const djId = song ? song.submitterId : null;
 
-      // Only non-DJ submissions count toward the cut threshold
+      // Non-DJ submissions count toward threshold, threshold is majority of ALL players
       const nonDjSubmissions = Object.keys(submissions).filter(pid => pid !== djId);
-      const nonDjPlayers = pc - (djId ? 1 : 0);
-      const maj = Math.ceil(nonDjPlayers / 2);
+      const maj = Math.ceil(pc / 2);
       const sc = nonDjSubmissions.length;
 
       if (song && sc >= maj && !window._majorityTriggered) {
@@ -158,15 +164,13 @@
       }
       if (song && sc < maj) window._majorityTriggered = false;
 
-      // No current song — either first song or between songs
-      // Only trigger if hostComplete is not mid-flight (lock)
+      // No current song — first submission plays immediately
       const scAll = Object.keys(submissions).length;
-      const majAll = Math.ceil(pc / 2);
-      if (!song && scAll >= majAll && !window._firstSongTriggered && !_hostCompleteLock) {
+      if (!song && scAll >= 1 && !window._firstSongTriggered && !_hostCompleteLock) {
         window._firstSongTriggered = true;
         setTimeout(() => triggerCut(players, submissions, null), 800);
       }
-      if (!song && scAll < majAll) window._firstSongTriggered = false;
+      if (!song && scAll < 1) window._firstSongTriggered = false;
     });
   }
 
@@ -286,19 +290,34 @@
 
     const ytId = extractYouTubeId(song.link);
     if (ytId) {
-      document.getElementById('yt-player-wrap').style.display = 'block';
-      document.getElementById('album-art').style.display = 'none';
-      document.getElementById('song-title').textContent = 'Loading…';
+      // Only host sees the video player
       if (local.isHost) {
+        document.getElementById('yt-player-wrap').style.display = 'block';
+        document.getElementById('album-art').style.display = 'none';
         if (ytReady && ytPlayer && ytPlayer.loadVideoById) loadYTVideo(ytId);
         else local.pendingVideoId = ytId;
       } else {
+        document.getElementById('yt-player-wrap').style.display = 'none';
+        document.getElementById('album-art').style.display = 'flex';
         local.songStartTime = songStartedAt ? Date.now() - (Date.now() - songStartedAt) : Date.now();
         startProgress();
       }
+      document.getElementById('song-title').textContent = 'Loading…';
       fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(song.link)}&format=json`)
-        .then(r=>r.json()).then(d=>{ document.getElementById('song-title').textContent = d.title||'YouTube Track'; })
-        .catch(()=>{ document.getElementById('song-title').textContent = 'YouTube Track'; });
+        .then(r=>r.json()).then(d=>{
+          const title = d.title||'YouTube Track';
+          document.getElementById('song-title').textContent = title;
+          // Update YouTube Music deep link
+          const ytBtn = document.getElementById('yt-music-btn');
+          ytBtn.href = `https://music.youtube.com/search?q=${encodeURIComponent(title)}`;
+          ytBtn.style.display = 'inline-flex';
+        })
+        .catch(()=>{
+          document.getElementById('song-title').textContent = 'YouTube Track';
+          const ytBtn = document.getElementById('yt-music-btn');
+          ytBtn.href = `https://music.youtube.com/search?q=${encodeURIComponent(song.link)}`;
+          ytBtn.style.display = 'inline-flex';
+        });
     } else {
       document.getElementById('yt-player-wrap').style.display = 'none';
       document.getElementById('album-art').style.display = 'flex';
@@ -315,6 +334,7 @@
     document.getElementById('song-state').style.display = 'none';
     document.getElementById('yt-player-wrap').style.display = 'none';
     document.getElementById('progress-fill').style.width = '0%';
+    document.getElementById('yt-music-btn').style.display = 'none';
   }
 
   // ── YOUTUBE ──
@@ -464,7 +484,8 @@
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&display=swap');
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
   :root{--bg:#f7f6f3;--surface:#fff;--border:#e8e6e0;--text:#1a1916;--text-2:#7a7770;--text-3:#b0aea8;--green:#2d6a4f;--green-bg:#edf7f2;--red:#c0392b;--red-bg:#fdf0ee;--amber:#b45309;--amber-bg:#fef9ee;--radius:12px;--radius-sm:8px}
-  body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;line-height:1.5}
+  html[data-theme="dark"]{--bg:#111110;--surface:#1c1c1a;--border:#2e2e2b;--text:#f0ede8;--text-2:#8a8780;--text-3:#4a4845;--green:#3a8f68;--green-bg:#0e2419;--red:#e05444;--red-bg:#2a1210;--amber:#d4810a;--amber-bg:#271a05}
+  body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;line-height:1.5;transition:background .2s,color .2s}
   /* LANDING */
   #landing{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:24px;gap:48px}
   .wordmark{font-family:'DM Mono',monospace;font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-2)}
@@ -534,6 +555,8 @@
   .player-score{font-family:'DM Mono',monospace;font-size:13px;font-weight:500}
   .remove-btn{background:none;border:none;color:var(--text-3);cursor:pointer;font-size:12px;padding:2px 4px;border-radius:4px;line-height:1;transition:color .15s,background .15s}
   .remove-btn:hover{color:var(--red);background:var(--red-bg)}
+  .theme-btn{background:none;border:none;cursor:pointer;font-size:18px;padding:4px;line-height:1;color:var(--text-2);transition:color .15s}
+  .theme-btn:hover{color:var(--text)}
   .host-panel{grid-column:1/-1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
   .host-panel h3{font-size:13px;font-weight:500;margin-bottom:12px}
   .host-actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -547,13 +570,18 @@
   .toast.green{background:var(--green)}.toast.red{background:var(--red)}
   @keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
   @keyframes toast-out{from{opacity:1}to{opacity:0}}
+  .yt-music-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:6px;background:#ff0000;color:#fff;font-size:12px;font-weight:500;text-decoration:none;transition:opacity .15s}
+  .yt-music-btn:hover{opacity:.85}
   .interrupt-flash{display:none;position:fixed;inset:0;background:rgba(192,57,43,.07);z-index:50;pointer-events:none;animation:flash .5s ease forwards}
   @keyframes flash{0%{opacity:1}100%{opacity:0}}
 </style>
 </head>
 <body>
 <div id="landing">
-  <div class="wordmark">Listening Party</div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.03</span></div>
+    <button class="theme-btn" id="theme-toggle-landing" onclick="toggleTheme()" title="Toggle dark mode">☀️</button>
+  </div>
   <div class="landing-cards">
     <div class="card">
       <h2>Host a room</h2>
@@ -575,7 +603,7 @@
   <div class="app-shell">
     <div class="app-header">
       <div class="room-info">
-        <span class="wordmark">Listening Party</span>
+        <span class="wordmark">Listening Party <span style="font-size:10px;opacity:0.6;">v1.03</span></span>
         <span class="room-code" id="header-code"></span>
         <span class="share-hint">share this code to invite friends</span>
         <div id="status-chip-wrap"></div>
@@ -584,6 +612,7 @@
         <div id="avatar-row"></div>
         <button class="btn btn-outline btn-sm" id="host-btn" style="display:none" onclick="toggleHostPanel()">⚙ Host</button>
         <button class="btn btn-outline btn-sm" id="leave-btn" style="display:none" onclick="leaveRoom()">Leave</button>
+        <button class="theme-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">☀️</button>
       </div>
     </div>
 
@@ -602,6 +631,11 @@
             <div class="song-title" id="song-title">—</div>
             <div class="song-submitter" id="song-submitter"></div>
             <a class="song-link" id="song-link" href="#" target="_blank"></a>
+            <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+              <a id="yt-music-btn" href="#" target="_blank" class="yt-music-btn" style="display:none">
+                ♥ Open in YouTube Music
+              </a>
+            </div>
           </div>
         </div>
         <div class="progress-wrap">
@@ -648,6 +682,23 @@
 <div id="toast-container"></div>
 
 <script>
+  // ── THEME ──
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('lp_theme', theme);
+    const icon = theme === 'dark' ? '☀️' : '🌙';
+    const t1 = document.getElementById('theme-toggle');
+    const t2 = document.getElementById('theme-toggle-landing');
+    if (t1) t1.textContent = icon;
+    if (t2) t2.textContent = icon;
+  }
+  function toggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    applyTheme(current === 'dark' ? 'light' : 'dark');
+  }
+  // Default to dark, respect saved preference
+  applyTheme(localStorage.getItem('lp_theme') || 'dark');
+
   let hostPanelOpen = false;
   function toggleHostPanel() {
     hostPanelOpen = !hostPanelOpen;
