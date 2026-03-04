@@ -72,7 +72,7 @@
     local.playerId = session.playerId;
     local.playerName = session.playerName;
     local.isHost = room.hostId === session.playerId;
-    local.hostOnly = room.hostOnly || session.hostOnly || false;
+    local.hostOnly = (room.hostId === session.playerId) && (room.hostOnly || false);
     local.isRemote = session.isRemote || false;
 
     // Re-write player slot if it was dropped — but not for host-only sessions
@@ -714,7 +714,7 @@
 <body>
 <div id="landing">
   <div style="display:flex;align-items:center;gap:12px;">
-    <div class="wordmark">Listening Party <span style="font-size:10px;opacity:0.5;letter-spacing:0">v1.53</span></div>
+    <div class="wordmark">Listening Party <span style="font-size:10px;opacity:0.5;letter-spacing:0">v1.54</span></div>
     <button class="theme-btn" id="theme-toggle-landing" onclick="toggleTheme()" title="Toggle dark mode"></button>
   </div>
   <div class="landing-cards">
@@ -752,7 +752,7 @@
   <div class="app-shell">
     <div class="app-header">
       <div class="room-info">
-        <span class="wordmark">Listening Party <span style="font-size:10px;opacity:0.5;letter-spacing:0">v1.53</span></span>
+        <span class="wordmark">Listening Party <span style="font-size:10px;opacity:0.5;letter-spacing:0">v1.54</span></span>
         <span class="room-code" id="header-code"></span>
         <span class="share-hint">share this code to invite friends</span>
         <div id="status-chip-wrap"></div>
@@ -848,7 +848,7 @@
         <div class="scoring-block">
           <div class="scoring-title">Surviving</div>
           <div class="scoring-row"><span>Song plays all the way through</span><span class="pts green">DJ +3</span></div>
-          <div class="scoring-row"><span>You picked the next song too</span><span class="pts green">DJ +6 total</span></div>
+          <div class="scoring-row"><span>Your song plays again next</span><span class="pts green">DJ +6 total</span></div>
         </div>
         <div class="scoring-block">
           <div class="scoring-title">Cutting your own song</div>
