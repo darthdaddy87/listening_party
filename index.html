@@ -5,12 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Listening Party</title>
 <script src="https://www.youtube.com/iframe_api"></script>
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getDatabase, ref, set, get, update, onValue, push, serverTimestamp, remove }
-    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
-
-  const firebaseConfig = {
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script>
+  firebase.initializeApp({
     apiKey: "AIzaSyDOthR_3Wm0r0olsYu1o-miRvoyI5Jj9Ho",
     authDomain: "listening-party-b66f9.firebaseapp.com",
     databaseURL: "https://listening-party-b66f9-default-rtdb.firebaseio.com",
@@ -18,348 +16,224 @@
     storageBucket: "listening-party-b66f9.firebasestorage.app",
     messagingSenderId: "501794449158",
     appId: "1:501794449158:web:8e90c4d8ef804b1e4ee087"
-  };
-
-  const app = initializeApp(firebaseConfig);
-  const db = getDatabase(app);
-
-  // ── LOCAL STATE ────────────────────────────────────────────
-  const local = {
-    roomCode: null,
-    playerId: null,
-    playerName: null,
-    isHost: false,
-    progress: 0,
-    songDuration: 210,
-    songStartTime: null,
-    progressInterval: null,
-    pendingVideoId: null,
-    unsubscribers: [],
-  };
-
-  // ── HELPERS ────────────────────────────────────────────────
-  function roomRef(path = '') { return ref(db, `rooms/${local.roomCode}${path ? '/' + path : ''}`); }
-  function genId() { return Math.random().toString(36).substring(2, 10); }
-  function genCode() { return Math.random().toString(36).substring(2, 7).toUpperCase(); }
+  });
+  const db = firebase.database();
 
   const COLORS = ['#2d6a4f','#1a4a8a','#7b2d8b','#b45309','#c0392b','#1a7a6e','#5a3e8a','#8a5c1a'];
+  const local = { roomCode:null, playerId:null, playerName:null, isHost:false, progress:0, songDuration:210, songStartTime:null, progressInterval:null, pendingVideoId:null };
 
-  // ── LANDING ────────────────────────────────────────────────
+  function rref(path) { return db.ref(path ? `rooms/${local.roomCode}/${path}` : `rooms/${local.roomCode}`); }
+  function genId() { return Math.random().toString(36).substring(2,10); }
+  function genCode() { return Math.random().toString(36).substring(2,7).toUpperCase(); }
+
+  // ── LANDING ──
   window.hostRoom = async function() {
     const name = document.getElementById('host-name').value.trim();
-    if (!name) { toast('Enter your name first', 'red'); return; }
-
+    if (!name) { toast('Enter your name first','red'); return; }
     const code = genCode();
-    const playerId = genId();
-    local.roomCode = code;
-    local.playerId = playerId;
-    local.playerName = name;
-    local.isHost = true;
-
-    await set(roomRef(), {
-      code,
-      hostId: playerId,
-      createdAt: serverTimestamp(),
-      state: 'waiting',
-      currentSong: null,
-      songStartedAt: null,
-    });
-
-    await set(roomRef(`players/${playerId}`), {
-      name,
-      score: 0,
-      color: COLORS[0],
-      joinedAt: serverTimestamp(),
-    });
-
+    const pid = genId();
+    local.roomCode = code; local.playerId = pid; local.playerName = name; local.isHost = true;
+    await db.ref(`rooms/${code}`).set({ code, hostId:pid, createdAt: firebase.database.ServerValue.TIMESTAMP, currentSong:null, songStartedAt:null });
+    await db.ref(`rooms/${code}/players/${pid}`).set({ name, score:0, color:COLORS[0], joinedAt: firebase.database.ServerValue.TIMESTAMP });
     initApp();
   };
 
   window.joinRoom = async function() {
     const name = document.getElementById('join-name').value.trim();
     const code = document.getElementById('join-code').value.trim().toUpperCase();
-    if (!name) { toast('Enter your name first', 'red'); return; }
-    if (!code) { toast('Enter a room code', 'red'); return; }
-
-    // Check room exists
-    const snap = await get(ref(db, `rooms/${code}`));
-    if (!snap.exists()) { toast('Room not found', 'red'); return; }
-
-    const playerId = genId();
-    local.roomCode = code;
-    local.playerId = playerId;
-    local.playerName = name;
-    local.isHost = false;
-
-    // Pick a color not taken
+    if (!name) { toast('Enter your name first','red'); return; }
+    if (!code) { toast('Enter a room code','red'); return; }
+    const snap = await db.ref(`rooms/${code}`).once('value');
+    if (!snap.exists()) { toast('Room not found — check the code','red'); return; }
+    const pid = genId();
+    local.roomCode = code; local.playerId = pid; local.playerName = name; local.isHost = false;
     const players = snap.val().players || {};
     const taken = Object.values(players).map(p => p.color);
-    const color = COLORS.find(c => !taken.includes(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
-
-    await set(ref(db, `rooms/${code}/players/${playerId}`), {
-      name,
-      score: 0,
-      color,
-      joinedAt: serverTimestamp(),
-    });
-
+    const color = COLORS.find(c => !taken.includes(c)) || COLORS[0];
+    await db.ref(`rooms/${code}/players/${pid}`).set({ name, score:0, color, joinedAt: firebase.database.ServerValue.TIMESTAMP });
+    db.ref(`rooms/${code}/players/${pid}`).onDisconnect().remove();
     initApp();
   };
 
-  // ── INIT APP ───────────────────────────────────────────────
+  // ── INIT ──
   function initApp() {
     document.getElementById('landing').style.display = 'none';
     document.getElementById('app').style.display = 'block';
     document.getElementById('header-code').textContent = local.roomCode;
     if (local.isHost) document.getElementById('host-btn').style.display = 'inline-flex';
-
-    // Show share info
-    document.getElementById('share-code').textContent = local.roomCode;
-
+    db.ref(`rooms/${local.roomCode}/players/${local.playerId}`).onDisconnect().remove();
     subscribeToRoom();
     initYouTube();
-
-    // Clean up player on disconnect
-    import("https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js").then(({ onDisconnect }) => {
-      onDisconnect(roomRef(`players/${local.playerId}`)).remove();
-    });
   }
 
-  // ── SUBSCRIBE ──────────────────────────────────────────────
-  let prevSong = null;
-  let prevSubmissions = {};
+  // ── SUBSCRIBE ──
+  let prevSongKey = null;
+  window._majorityTriggered = false;
+  window._firstSongTriggered = false;
 
   function subscribeToRoom() {
-    // Room state
-    const unsub1 = onValue(roomRef(), snap => {
+    db.ref(`rooms/${local.roomCode}`).on('value', snap => {
       if (!snap.exists()) return;
       const room = snap.val();
-      renderRoom(room);
-    });
-    local.unsubscribers.push(unsub1);
-  }
+      const players = room.players || {};
+      const submissions = room.submissions || {};
+      const song = room.currentSong || null;
 
-  function renderRoom(room) {
-    const players = room.players || {};
-    const submissions = room.submissions || {};
-    const currentSong = room.currentSong || null;
+      renderAvatars(players);
+      renderPlayerList(players, submissions);
+      renderTensionDots(players, submissions);
+      renderSubmitArea(submissions);
+      updateStatusChip(!!song);
 
-    renderAvatars(players);
-    renderPlayerList(players, submissions);
-    renderTensionDots(players, submissions);
-    renderSubmitArea(submissions);
-    updateStatusChip(!!currentSong);
-
-    // Song changed
-    const songKey = currentSong ? currentSong.link + currentSong.submitterId : null;
-    const prevKey = prevSong ? prevSong.link + prevSong.submitterId : null;
-
-    if (songKey !== prevKey) {
-      if (currentSong) {
-        playSong(currentSong, players, room.songStartedAt);
-      } else {
-        stopSong();
+      // Song changed?
+      const songKey = song ? song.link + song.submitterId : null;
+      if (songKey !== prevSongKey) {
+        prevSongKey = songKey;
+        if (song) playSong(song, room.songStartedAt);
+        else stopSong();
       }
-      prevSong = currentSong;
-    }
 
-    // Check majority (host only triggers the cut)
-    if (local.isHost && currentSong !== null) {
-      const playerCount = Object.keys(players).length;
-      const subCount = Object.keys(submissions).length;
-      const majority = Math.ceil(playerCount / 2);
-      if (subCount >= majority) {
-        // Debounce — only trigger once
-        if (!window._majorityTriggered) {
-          window._majorityTriggered = true;
-          setTimeout(() => triggerMajorityCut(players, submissions, currentSong), 800);
-        }
-      } else {
-        window._majorityTriggered = false;
+      if (!local.isHost) return;
+
+      const pc = Object.keys(players).length;
+      const sc = Object.keys(submissions).length;
+      const maj = Math.ceil(pc / 2);
+
+      if (song && sc >= maj && !window._majorityTriggered) {
+        window._majorityTriggered = true;
+        setTimeout(() => triggerCut(players, submissions, song), 800);
       }
-    }
+      if (song && sc < maj) window._majorityTriggered = false;
 
-    // First song — if no current song and submissions hit majority, host starts first song
-    if (local.isHost && !currentSong) {
-      const playerCount = Object.keys(players).length;
-      const subCount = Object.keys(submissions).length;
-      const majority = Math.ceil(playerCount / 2);
-      if (subCount >= majority && !window._firstSongTriggered) {
+      if (!song && sc >= maj && !window._firstSongTriggered) {
         window._firstSongTriggered = true;
-        setTimeout(() => triggerMajorityCut(players, submissions, null), 800);
-      } else if (subCount < majority) {
-        window._firstSongTriggered = false;
+        setTimeout(() => triggerCut(players, submissions, null), 800);
       }
-    }
-
-    prevSubmissions = submissions;
+      if (!song && sc < maj) window._firstSongTriggered = false;
+    });
   }
 
-  // ── RENDER HELPERS ─────────────────────────────────────────
+  // ── RENDER ──
   function renderAvatars(players) {
-    const row = document.getElementById('avatar-row');
-    row.innerHTML = Object.values(players).slice(0,6).map(p =>
-      `<div class="avatar" style="background:${p.color}">${p.name[0].toUpperCase()}</div>`
-    ).join('');
+    document.getElementById('avatar-row').innerHTML = Object.values(players).slice(0,6).map(p =>
+      `<div class="avatar" style="background:${p.color}">${p.name[0].toUpperCase()}</div>`).join('');
   }
 
   function renderPlayerList(players, submissions) {
     const sorted = Object.entries(players).sort((a,b) => b[1].score - a[1].score);
-    const list = document.getElementById('player-list');
-    list.innerHTML = sorted.map(([pid, p], i) => `
+    document.getElementById('player-list').innerHTML = sorted.map(([pid,p],i) => `
       <div class="player-row">
         <div class="player-rank">${i+1}</div>
         <div class="avatar-sm" style="background:${p.color}">${p.name[0].toUpperCase()}</div>
-        <div class="player-name ${pid === local.playerId ? 'is-you' : ''}">${p.name}</div>
-        <div class="player-submitted ${submissions[pid] ? 'active' : ''}"></div>
+        <div class="player-name ${pid===local.playerId?'is-you':''}">${p.name}</div>
+        <div class="player-submitted ${submissions[pid]?'active':''}"></div>
         <div class="player-score">${p.score}</div>
       </div>`).join('');
   }
 
   function renderTensionDots(players, submissions) {
     const n = Object.keys(players).length;
-    const submitted = Object.keys(submissions).length;
-    const majority = Math.ceil(n / 2);
-    const wrap = document.getElementById('tension-dots');
-    wrap.innerHTML = Array.from({ length: n }, (_, i) => {
-      let cls = i < submitted ? (submitted >= majority ? 'active warning' : 'active') : '';
+    const s = Object.keys(submissions).length;
+    const maj = Math.ceil(n/2);
+    document.getElementById('tension-dots').innerHTML = Array.from({length:n},(_,i) => {
+      const cls = i < s ? (s >= maj ? 'active warning' : 'active') : '';
       return `<div class="tension-dot ${cls}"></div>`;
     }).join('');
-
-    const status = document.getElementById('tension-status');
-    if (submitted === 0) status.textContent = 'Nobody has submitted yet';
-    else if (submitted < majority) status.textContent = `${submitted} in — need ${majority - submitted} more to cut`;
-    else status.textContent = 'Majority reached — cutting…';
+    const el = document.getElementById('tension-status');
+    if (s === 0) el.textContent = 'Nobody submitted yet';
+    else if (s < maj) el.textContent = `${s} in — need ${maj-s} more to cut`;
+    else el.textContent = 'Majority reached — cutting…';
   }
 
   function renderSubmitArea(submissions) {
-    const mySub = submissions[local.playerId];
-    document.getElementById('submit-area').style.display = mySub ? 'none' : 'flex';
-    document.getElementById('submitted-state').style.display = mySub ? 'flex' : 'none';
-    if (mySub) document.getElementById('submitted-link-display').textContent = mySub.link;
+    const mine = submissions[local.playerId];
+    document.getElementById('submit-area').style.display = mine ? 'none' : 'flex';
+    document.getElementById('submitted-state').style.display = mine ? 'flex' : 'none';
+    if (mine) document.getElementById('submitted-link-display').textContent = mine.link;
   }
 
-  function updateStatusChip(isPlaying) {
-    const wrap = document.getElementById('status-chip-wrap');
-    wrap.innerHTML = isPlaying
+  function updateStatusChip(live) {
+    document.getElementById('status-chip-wrap').innerHTML = live
       ? `<span class="status-chip live"><span class="dot-blink"></span> Live</span>`
       : `<span class="status-chip waiting"><span class="dot-blink"></span> Waiting</span>`;
   }
 
-  // ── SUBMIT SONG ────────────────────────────────────────────
+  // ── SUBMIT ──
   window.submitSong = async function() {
     const input = document.getElementById('link-input');
     const link = input.value.trim();
-    if (!link) { toast('Paste a link first', 'red'); return; }
-
-    await set(roomRef(`submissions/${local.playerId}`), {
-      link,
-      playerName: local.playerName,
-      timestamp: Date.now(),
-    });
-
+    if (!link) { toast('Paste a link first','red'); return; }
+    await rref(`submissions/${local.playerId}`).set({ link, playerName:local.playerName, timestamp:Date.now() });
     input.value = '';
-    toast('Locked in ✓', 'green');
+    toast('Locked in ✓','green');
   };
 
   window.cancelSubmission = async function() {
-    await remove(roomRef(`submissions/${local.playerId}`));
+    await rref(`submissions/${local.playerId}`).remove();
   };
 
-  // ── MAJORITY CUT ───────────────────────────────────────────
-  async function triggerMajorityCut(players, submissions, currentSong) {
+  // ── CUT ──
+  async function triggerCut(players, submissions, currentSong) {
     if (!local.isHost) return;
-
-    // Find earliest submission
-    let winnerId = null;
-    let earliest = Infinity;
-    for (const [pid, sub] of Object.entries(submissions)) {
+    let winnerId = null, earliest = Infinity;
+    for (const [pid,sub] of Object.entries(submissions)) {
       if (sub.timestamp < earliest) { earliest = sub.timestamp; winnerId = pid; }
     }
     if (!winnerId) return;
 
     const winnerSub = submissions[winnerId];
     const winnerPlayer = players[winnerId];
-
-    // Award points
     const updates = {};
 
     if (currentSong) {
       const djId = currentSong.submitterId;
       const djPts = Math.floor(local.progress / 34);
       const cutterPts = Math.floor(local.progress / 33) + 1;
-      if (djPts > 0) updates[`players/${djId}/score`] = (players[djId]?.score || 0) + djPts;
-      updates[`players/${winnerId}/score`] = (winnerPlayer?.score || 0) + cutterPts;
+      if (djPts > 0) updates[`players/${djId}/score`] = (players[djId]?.score||0) + djPts;
+      updates[`players/${winnerId}/score`] = (winnerPlayer?.score||0) + cutterPts;
+      // flash
+      const flash = document.getElementById('interrupt-flash');
+      flash.style.display = 'block';
+      setTimeout(() => flash.style.display = 'none', 500);
+      toast(`${winnerPlayer?.name} cuts the song!`,'red');
     }
 
-    // Set new song, clear submissions
-    updates['currentSong'] = { link: winnerSub.link, submitterId: winnerId, submitterName: winnerPlayer?.name || '?' };
-    updates['songStartedAt'] = serverTimestamp();
+    updates['currentSong'] = { link:winnerSub.link, submitterId:winnerId, submitterName:winnerPlayer?.name||'?' };
+    updates['songStartedAt'] = firebase.database.ServerValue.TIMESTAMP;
     updates['submissions'] = null;
-
-    await update(roomRef(), updates);
-
-    // Flash
-    const flash = document.getElementById('interrupt-flash');
-    flash.style.display = 'block';
-    setTimeout(() => flash.style.display = 'none', 500);
-
-    if (currentSong) toast(`${winnerPlayer?.name} cuts the song!`, 'red');
+    await db.ref(`rooms/${local.roomCode}`).update(updates);
   }
 
-  // ── PLAY SONG ──────────────────────────────────────────────
-  function playSong(song, players, songStartedAt) {
+  // ── PLAY ──
+  function playSong(song, songStartedAt) {
     stopProgress();
     local.progress = 0;
-
     document.getElementById('no-song-state').style.display = 'none';
     document.getElementById('song-state').style.display = 'flex';
-
     document.getElementById('song-submitter').textContent = `submitted by ${song.submitterName}`;
-    const linkEl = document.getElementById('song-link');
-    linkEl.textContent = song.link;
-    linkEl.href = song.link;
+    document.getElementById('song-link').textContent = song.link;
+    document.getElementById('song-link').href = song.link;
 
     const ytId = extractYouTubeId(song.link);
-
     if (ytId) {
       document.getElementById('yt-player-wrap').style.display = 'block';
       document.getElementById('album-art').style.display = 'none';
       document.getElementById('song-title').textContent = 'Loading…';
-
-      // Only host actually plays audio — clients show UI only
       if (local.isHost) {
-        if (ytReady && ytPlayer && ytPlayer.loadVideoById) {
-          loadYTVideo(ytId);
-        } else {
-          local.pendingVideoId = ytId;
-        }
+        if (ytReady && ytPlayer && ytPlayer.loadVideoById) loadYTVideo(ytId);
+        else local.pendingVideoId = ytId;
       } else {
-        // Clients: sync progress to server timestamp
-        if (songStartedAt) {
-          const elapsed = (Date.now() - songStartedAt) / 1000;
-          local.songStartTime = Date.now() - elapsed * 1000;
-        } else {
-          local.songStartTime = Date.now();
-        }
+        local.songStartTime = songStartedAt ? Date.now() - (Date.now() - songStartedAt) : Date.now();
         startProgress();
       }
-
       fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(song.link)}&format=json`)
-        .then(r => r.json())
-        .then(d => { document.getElementById('song-title').textContent = d.title || 'YouTube Track'; })
-        .catch(() => { document.getElementById('song-title').textContent = 'YouTube Track'; });
+        .then(r=>r.json()).then(d=>{ document.getElementById('song-title').textContent = d.title||'YouTube Track'; })
+        .catch(()=>{ document.getElementById('song-title').textContent = 'YouTube Track'; });
     } else {
       document.getElementById('yt-player-wrap').style.display = 'none';
       document.getElementById('album-art').style.display = 'flex';
-      let title = song.link;
-      try {
-        const u = new URL(song.link);
-        title = u.hostname.replace('www.','') + u.pathname;
-      } catch(e) {}
-      document.getElementById('song-title').textContent = title;
-      if (songStartedAt) local.songStartTime = Date.now() - ((Date.now() - songStartedAt));
-      else local.songStartTime = Date.now();
+      document.getElementById('song-title').textContent = song.link;
+      local.songStartTime = Date.now();
       startProgress();
     }
   }
@@ -370,42 +244,31 @@
     document.getElementById('no-song-state').style.display = 'flex';
     document.getElementById('song-state').style.display = 'none';
     document.getElementById('yt-player-wrap').style.display = 'none';
-    document.getElementById('album-art').style.display = 'flex';
     document.getElementById('progress-fill').style.width = '0%';
   }
 
-  // ── YOUTUBE ────────────────────────────────────────────────
-  let ytPlayer = null;
-  let ytReady = false;
+  // ── YOUTUBE ──
+  let ytPlayer = null, ytReady = false;
 
   function initYouTube() {
-    if (window.YT && window.YT.Player) {
-      createYTPlayer();
-    } else {
-      window.onYouTubeIframeAPIReady = createYTPlayer;
-    }
+    if (window.YT && window.YT.Player) createYTPlayer();
+    else window.onYouTubeIframeAPIReady = createYTPlayer;
   }
 
   function createYTPlayer() {
     ytReady = true;
     ytPlayer = new YT.Player('yt-player', {
-      height: '100%', width: '100%', videoId: '',
-      playerVars: { autoplay: 1, controls: 1, rel: 0, modestbranding: 1 },
-      events: {
-        onStateChange: onYTStateChange,
+      height:'100%', width:'100%', videoId:'',
+      playerVars:{ autoplay:1, controls:1, rel:0, modestbranding:1 },
+      events:{
+        onStateChange: e => {
+          if (e.data===YT.PlayerState.ENDED) hostComplete();
+          if (e.data===YT.PlayerState.PLAYING) { const d=ytPlayer.getDuration(); if(d) local.songDuration=d; startProgress(); }
+          if (e.data===YT.PlayerState.PAUSED) stopProgress();
+        },
         onReady: () => { if (local.pendingVideoId) loadYTVideo(local.pendingVideoId); }
       }
     });
-  }
-
-  function onYTStateChange(e) {
-    if (e.data === YT.PlayerState.ENDED) hostCompleteSong();
-    if (e.data === YT.PlayerState.PLAYING) {
-      const dur = ytPlayer.getDuration();
-      if (dur) local.songDuration = dur;
-      startProgress();
-    }
-    if (e.data === YT.PlayerState.PAUSED) stopProgress();
   }
 
   function extractYouTubeId(url) {
@@ -417,253 +280,178 @@
     return null;
   }
 
-  function loadYTVideo(videoId) {
-    local.pendingVideoId = null;
-    if (ytPlayer && ytPlayer.loadVideoById) ytPlayer.loadVideoById(videoId);
-  }
+  function loadYTVideo(id) { local.pendingVideoId=null; if(ytPlayer&&ytPlayer.loadVideoById) ytPlayer.loadVideoById(id); }
 
-  // ── PROGRESS ───────────────────────────────────────────────
+  // ── PROGRESS ──
   function startProgress() {
     stopProgress();
     if (!local.songStartTime) local.songStartTime = Date.now();
     local.progressInterval = setInterval(tickProgress, 500);
   }
-
-  function stopProgress() {
-    if (local.progressInterval) { clearInterval(local.progressInterval); local.progressInterval = null; }
-  }
+  function stopProgress() { if(local.progressInterval){clearInterval(local.progressInterval);local.progressInterval=null;} }
 
   function tickProgress() {
     let elapsed;
-    if (local.isHost && ytPlayer && ytPlayer.getCurrentTime && ytPlayer.getPlayerState?.() === 1) {
+    if (local.isHost && ytPlayer && ytPlayer.getCurrentTime && ytPlayer.getPlayerState&&ytPlayer.getPlayerState()===1) {
       elapsed = ytPlayer.getCurrentTime();
-      const dur = ytPlayer.getDuration();
-      if (dur) local.songDuration = dur;
+      const d = ytPlayer.getDuration(); if(d) local.songDuration=d;
     } else {
-      elapsed = (Date.now() - local.songStartTime) / 1000;
+      elapsed = (Date.now()-local.songStartTime)/1000;
     }
-
-    local.progress = Math.min((elapsed / local.songDuration) * 100, 100);
-    document.getElementById('progress-fill').style.width = local.progress + '%';
-
-    const s = Math.floor(elapsed);
-    document.getElementById('progress-time').textContent = `${Math.floor(s/60)}:${(s%60).toString().padStart(2,'0')}`;
-    const t = Math.floor(local.songDuration);
-    document.getElementById('progress-total').textContent = `${Math.floor(t/60)}:${(t%60).toString().padStart(2,'0')}`;
-
-    let pts = local.progress < 33 ? 1 : local.progress < 66 ? 2 : 3;
-    document.getElementById('points-preview').textContent = `+${pts} pts if survived`;
-
-    if (local.progress >= 100 && local.isHost) hostCompleteSong();
+    local.progress = Math.min((elapsed/local.songDuration)*100, 100);
+    document.getElementById('progress-fill').style.width = local.progress+'%';
+    const s=Math.floor(elapsed);
+    document.getElementById('progress-time').textContent=`${Math.floor(s/60)}:${(s%60).toString().padStart(2,'0')}`;
+    const t=Math.floor(local.songDuration);
+    document.getElementById('progress-total').textContent=`${Math.floor(t/60)}:${(t%60).toString().padStart(2,'0')}`;
+    const pts = local.progress<33?1:local.progress<66?2:3;
+    document.getElementById('points-preview').textContent=`+${pts} pts if survived`;
+    if (local.progress>=100&&local.isHost) hostComplete();
   }
 
-  async function hostCompleteSong() {
+  async function hostComplete() {
     if (!local.isHost) return;
     stopProgress();
-
-    // Get current state to award points
-    const snap = await get(roomRef());
+    const snap = await db.ref(`rooms/${local.roomCode}`).once('value');
     if (!snap.exists()) return;
     const room = snap.val();
     if (!room.currentSong) return;
-
     const djId = room.currentSong.submitterId;
-    const players = room.players || {};
+    const players = room.players||{};
     const updates = {};
-    updates[`players/${djId}/score`] = (players[djId]?.score || 0) + 3;
-    updates['currentSong'] = null;
-    updates['songStartedAt'] = null;
-    updates['submissions'] = null;
-    await update(roomRef(), updates);
-
-    toast(`${room.currentSong.submitterName}'s song played through! +3 pts`, 'green');
-    window._majorityTriggered = false;
-    window._firstSongTriggered = false;
+    updates[`players/${djId}/score`] = (players[djId]?.score||0)+3;
+    updates['currentSong'] = null; updates['songStartedAt'] = null; updates['submissions'] = null;
+    await db.ref(`rooms/${local.roomCode}`).update(updates);
+    toast(`${room.currentSong.submitterName}'s song played through! +3 pts`,'green');
+    window._majorityTriggered = false; window._firstSongTriggered = false;
   }
 
-  // ── HOST CONTROLS ──────────────────────────────────────────
+  // ── HOST CONTROLS ──
   window.hostSkipSong = async function() {
     if (!local.isHost) return;
-    const snap = await get(roomRef());
-    if (!snap.exists()) return;
-    const room = snap.val();
-    await update(roomRef(), { currentSong: null, songStartedAt: null, submissions: null });
-    if (ytPlayer && ytPlayer.stopVideo) ytPlayer.stopVideo();
-    window._majorityTriggered = false;
-    window._firstSongTriggered = false;
+    await db.ref(`rooms/${local.roomCode}`).update({ currentSong:null, songStartedAt:null, submissions:null });
+    if (ytPlayer&&ytPlayer.stopVideo) ytPlayer.stopVideo();
+    window._majorityTriggered=false; window._firstSongTriggered=false;
     toast('Song skipped');
   };
 
   window.hostResetScores = async function() {
     if (!local.isHost) return;
-    const snap = await get(roomRef(`players`));
+    const snap = await db.ref(`rooms/${local.roomCode}/players`).once('value');
     if (!snap.exists()) return;
     const updates = {};
-    Object.keys(snap.val()).forEach(pid => updates[`${pid}/score`] = 0);
-    await update(roomRef('players'), updates);
+    Object.keys(snap.val()).forEach(pid => updates[`${pid}/score`]=0);
+    await db.ref(`rooms/${local.roomCode}/players`).update(updates);
     toast('Scores reset');
   };
 
-  // ── TOAST ──────────────────────────────────────────────────
-  window.toast = function(msg, type = '') {
+  // ── TOAST ──
+  window.toast = function(msg, type='') {
     const wrap = document.getElementById('toast-container');
     const el = document.createElement('div');
-    el.className = `toast ${type}`;
-    el.textContent = msg;
-    wrap.appendChild(el);
-    setTimeout(() => el.remove(), 3000);
+    el.className=`toast ${type}`; el.textContent=msg;
+    wrap.appendChild(el); setTimeout(()=>el.remove(),3000);
   };
-
-  // make toast globally accessible
-  window._toast = window.toast;
 </script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&display=swap');
-
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  :root {
-    --bg: #f7f6f3;
-    --surface: #ffffff;
-    --border: #e8e6e0;
-    --text: #1a1916;
-    --text-2: #7a7770;
-    --text-3: #b0aea8;
-    --green: #2d6a4f;
-    --green-bg: #edf7f2;
-    --red: #c0392b;
-    --red-bg: #fdf0ee;
-    --amber: #b45309;
-    --amber-bg: #fef9ee;
-    --radius: 12px;
-    --radius-sm: 8px;
-  }
-
-  body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; line-height: 1.5; }
-
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#f7f6f3;--surface:#fff;--border:#e8e6e0;--text:#1a1916;--text-2:#7a7770;--text-3:#b0aea8;--green:#2d6a4f;--green-bg:#edf7f2;--red:#c0392b;--red-bg:#fdf0ee;--amber:#b45309;--amber-bg:#fef9ee;--radius:12px;--radius-sm:8px}
+  body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;line-height:1.5}
   /* LANDING */
-  #landing { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; gap: 48px; }
-  .wordmark { font-family: 'DM Mono', monospace; font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-2); }
-  .landing-cards { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; max-width: 560px; width: 100%; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; flex: 1; min-width: 220px; }
-  .card h2 { font-size: 15px; font-weight: 500; margin-bottom: 6px; }
-  .card p { font-size: 13px; color: var(--text-2); margin-bottom: 20px; line-height: 1.6; }
-
+  #landing{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:24px;gap:48px}
+  .wordmark{font-family:'DM Mono',monospace;font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-2)}
+  .landing-cards{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;max-width:560px;width:100%}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;flex:1;min-width:220px}
+  .card h2{font-size:15px;font-weight:500;margin-bottom:6px}
+  .card p{font-size:13px;color:var(--text-2);margin-bottom:20px;line-height:1.6}
   /* BUTTONS */
-  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 18px; border-radius: var(--radius-sm); font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; border: none; transition: opacity 0.15s, transform 0.1s; width: 100%; }
-  .btn:active { transform: scale(0.98); }
-  .btn-dark { background: var(--text); color: #fff; }
-  .btn-dark:hover { opacity: 0.85; }
-  .btn-outline { background: transparent; color: var(--text); border: 1px solid var(--border); }
-  .btn-outline:hover { background: var(--bg); }
-  .btn-sm { padding: 7px 14px; font-size: 12px; width: auto; }
-
-  input[type="text"] { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: 'DM Sans', sans-serif; font-size: 13px; background: var(--bg); color: var(--text); outline: none; transition: border-color 0.15s; margin-bottom: 10px; }
-  input[type="text"]:focus { border-color: var(--text); }
-  input[type="text"]::placeholder { color: var(--text-3); }
-
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 18px;border-radius:var(--radius-sm);font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:opacity .15s,transform .1s;width:100%}
+  .btn:active{transform:scale(.98)}
+  .btn-dark{background:var(--text);color:#fff}.btn-dark:hover{opacity:.85}
+  .btn-outline{background:transparent;color:var(--text);border:1px solid var(--border)}.btn-outline:hover{background:var(--bg)}
+  .btn-sm{padding:7px 14px;font-size:12px;width:auto}
+  input[type=text]{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-family:'DM Sans',sans-serif;font-size:13px;background:var(--bg);color:var(--text);outline:none;transition:border-color .15s;margin-bottom:10px}
+  input[type=text]:focus{border-color:var(--text)}
+  input[type=text]::placeholder{color:var(--text-3)}
   /* APP */
-  #app { display: none; }
-  .app-shell { display: grid; grid-template-columns: 1fr; max-width: 1100px; margin: 0 auto; padding: 20px; gap: 16px; }
-  @media (min-width: 700px) { .app-shell { grid-template-columns: 1fr 320px; padding: 24px; } }
-
+  #app{display:none}
+  .app-shell{display:grid;grid-template-columns:1fr;max-width:1100px;margin:0 auto;padding:20px;gap:16px}
+  @media(min-width:700px){.app-shell{grid-template-columns:1fr 320px;padding:24px}}
   /* HEADER */
-  .app-header { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); flex-wrap: wrap; gap: 10px; }
-  .room-info { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .room-code { font-family: 'DM Mono', monospace; font-size: 12px; background: var(--bg); border: 1px solid var(--border); padding: 4px 10px; border-radius: 6px; color: var(--text-2); letter-spacing: 0.08em; }
-  .share-hint { font-size: 12px; color: var(--text-3); }
-  .avatar { width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--surface); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; margin-left: -6px; color: #fff; }
-  .avatar:first-child { margin-left: 0; }
-  .avatar-sm { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; color: #fff; flex-shrink: 0; }
-  #avatar-row { display: flex; }
-
-  /* SECTION LABEL */
-  .section-label { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-3); margin-bottom: 4px; }
-
+  .app-header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);flex-wrap:wrap;gap:10px}
+  .room-info{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .room-code{font-family:'DM Mono',monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);padding:4px 10px;border-radius:6px;color:var(--text-2);letter-spacing:.08em}
+  .share-hint{font-size:12px;color:var(--text-3)}
+  .avatar{width:28px;height:28px;border-radius:50%;border:2px solid var(--surface);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;margin-left:-6px;color:#fff}
+  .avatar:first-child{margin-left:0}
+  .avatar-sm{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#fff;flex-shrink:0}
+  #avatar-row{display:flex}
+  .section-label{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--text-3);margin-bottom:4px}
   /* NOW PLAYING */
-  .now-playing { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; display: flex; flex-direction: column; gap: 20px; }
-  .no-song-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 40px 20px; text-align: center; color: var(--text-3); min-height: 160px; }
-  #song-state { display: none; flex-direction: column; gap: 20px; }
-  #yt-player-wrap { width: 100%; aspect-ratio: 16/9; border-radius: 8px; overflow: hidden; background: #000; display: none; }
-  #yt-player { width: 100%; height: 100%; }
-
-  .song-display { display: flex; gap: 16px; align-items: flex-start; }
-  .album-art { width: 72px; height: 72px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 28px; position: relative; overflow: hidden; }
-  .album-art::after { content: ''; position: absolute; inset: 0; border-radius: 8px; border: 2px solid var(--text); animation: pulse-border 2s ease-in-out infinite; }
-  @keyframes pulse-border { 0%,100%{opacity:.1} 50%{opacity:.4} }
-  .song-meta { flex: 1; min-width: 0; }
-  .song-title { font-size: 16px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .song-submitter { font-size: 13px; color: var(--text-2); margin-top: 2px; }
-  .song-link { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--text-3); margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
-
+  .now-playing{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;display:flex;flex-direction:column;gap:20px}
+  .no-song-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:40px 20px;text-align:center;color:var(--text-3);min-height:160px}
+  #song-state{display:none;flex-direction:column;gap:20px}
+  #yt-player-wrap{width:100%;aspect-ratio:16/9;border-radius:8px;overflow:hidden;background:#000;display:none}
+  #yt-player{width:100%;height:100%}
+  .song-display{display:flex;gap:16px;align-items:flex-start}
+  .album-art{width:72px;height:72px;border-radius:8px;background:var(--bg);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:28px;position:relative;overflow:hidden}
+  .album-art::after{content:'';position:absolute;inset:0;border-radius:8px;border:2px solid var(--text);animation:pulse-border 2s ease-in-out infinite}
+  @keyframes pulse-border{0%,100%{opacity:.1}50%{opacity:.4}}
+  .song-meta{flex:1;min-width:0}
+  .song-title{font-size:16px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .song-submitter{font-size:13px;color:var(--text-2);margin-top:2px}
+  .song-link{font-family:'DM Mono',monospace;font-size:11px;color:var(--text-3);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
   /* PROGRESS */
-  .progress-wrap { display: flex; flex-direction: column; gap: 8px; }
-  .progress-bar-bg { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
-  .progress-bar-fill { height: 100%; background: var(--text); border-radius: 2px; transition: width 0.5s linear; }
-  .progress-meta { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--text-2); }
-  .points-preview { font-family: 'DM Mono', monospace; font-size: 11px; padding: 2px 8px; border-radius: 4px; background: var(--amber-bg); color: var(--amber); }
-
+  .progress-wrap{display:flex;flex-direction:column;gap:8px}
+  .progress-bar-bg{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+  .progress-bar-fill{height:100%;background:var(--text);border-radius:2px;transition:width .5s linear}
+  .progress-meta{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--text-2)}
+  .points-preview{font-family:'DM Mono',monospace;font-size:11px;padding:2px 8px;border-radius:4px;background:var(--amber-bg);color:var(--amber)}
   /* TENSION */
-  .tension-wrap { display: flex; flex-direction: column; gap: 8px; }
-  .tension-label-row { display: flex; justify-content: space-between; align-items: center; }
-  .tension-dots { display: flex; gap: 6px; }
-  .tension-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); transition: background 0.3s, transform 0.3s; }
-  .tension-dot.active { background: var(--text); transform: scale(1.2); }
-  .tension-dot.warning { background: var(--amber); animation: dot-pulse 0.8s ease-in-out infinite alternate; }
-  @keyframes dot-pulse { from{transform:scale(1)} to{transform:scale(1.4)} }
-  .tension-status { font-size: 12px; color: var(--text-2); font-style: italic; }
-
+  .tension-wrap{display:flex;flex-direction:column;gap:8px}
+  .tension-label-row{display:flex;justify-content:space-between;align-items:center}
+  .tension-dots{display:flex;gap:6px}
+  .tension-dot{width:8px;height:8px;border-radius:50%;background:var(--border);transition:background .3s,transform .3s}
+  .tension-dot.active{background:var(--text);transform:scale(1.2)}
+  .tension-dot.warning{background:var(--amber);animation:dot-pulse .8s ease-in-out infinite alternate}
+  @keyframes dot-pulse{from{transform:scale(1)}to{transform:scale(1.4)}}
+  .tension-status{font-size:12px;color:var(--text-2);font-style:italic}
   /* SIDEBAR */
-  .sidebar { display: flex; flex-direction: column; gap: 16px; }
-  .my-submission { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-  .submit-area { display: flex; flex-direction: column; gap: 10px; }
-  .submitted-state { display: none; flex-direction: column; gap: 10px; }
-  .submitted-badge { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--green-bg); border: 1px solid #b7e4cc; border-radius: var(--radius-sm); font-size: 13px; color: var(--green); font-weight: 500; }
-  .submitted-link { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-  /* LEADERBOARD */
-  .leaderboard { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-  .player-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
-  .player-row:last-child { border-bottom: none; }
-  .player-rank { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--text-3); width: 16px; text-align: center; }
-  .player-name { flex: 1; font-size: 13px; }
-  .player-name.is-you { font-weight: 500; }
-  .player-name.is-you::after { content: ' (you)'; font-weight: 300; color: var(--text-2); }
-  .player-score { font-family: 'DM Mono', monospace; font-size: 13px; font-weight: 500; }
-  .player-submitted { width: 8px; height: 8px; border-radius: 50%; background: var(--border); transition: background 0.3s; }
-  .player-submitted.active { background: var(--green); }
-
-  /* HOST PANEL */
-  .host-panel { grid-column: 1/-1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-  .host-panel h3 { font-size: 13px; font-weight: 500; margin-bottom: 12px; }
-  .host-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-
-  /* STATUS CHIPS */
-  .status-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 500; }
-  .status-chip.live { background: var(--red-bg); color: var(--red); }
-  .status-chip.waiting { background: var(--amber-bg); color: var(--amber); }
-  .dot-blink { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: blink 1.2s ease-in-out infinite; }
-  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
-
-  /* TOAST */
-  #toast-container { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 100; pointer-events: none; }
-  .toast { background: var(--text); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; white-space: nowrap; animation: toast-in 0.2s ease, toast-out 0.3s ease 2.5s forwards; }
-  .toast.green { background: var(--green); }
-  .toast.red { background: var(--red); }
-  @keyframes toast-in { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
-  @keyframes toast-out { from{opacity:1} to{opacity:0} }
-
-  /* INTERRUPT FLASH */
-  .interrupt-flash { display: none; position: fixed; inset: 0; background: rgba(192,57,43,0.07); z-index: 50; pointer-events: none; animation: flash 0.5s ease forwards; }
-  @keyframes flash { 0%{opacity:1} 100%{opacity:0} }
-
-  /* CLIENT NOTICE */
-  .client-notice { background: var(--amber-bg); border: 1px solid #f0d080; border-radius: var(--radius-sm); padding: 10px 14px; font-size: 12px; color: var(--amber); }
+  .sidebar{display:flex;flex-direction:column;gap:16px}
+  .my-submission{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+  .submit-area{display:flex;flex-direction:column;gap:10px}
+  .submitted-state{display:none;flex-direction:column;gap:10px}
+  .submitted-badge{display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--green-bg);border:1px solid #b7e4cc;border-radius:var(--radius-sm);font-size:13px;color:var(--green);font-weight:500}
+  .submitted-link{font-family:'DM Mono',monospace;font-size:11px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .leaderboard{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+  .player-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
+  .player-row:last-child{border-bottom:none}
+  .player-rank{font-family:'DM Mono',monospace;font-size:11px;color:var(--text-3);width:16px;text-align:center}
+  .player-name{flex:1;font-size:13px}
+  .player-name.is-you{font-weight:500}
+  .player-name.is-you::after{content:' (you)';font-weight:300;color:var(--text-2)}
+  .player-score{font-family:'DM Mono',monospace;font-size:13px;font-weight:500}
+  .player-submitted{width:8px;height:8px;border-radius:50%;background:var(--border);transition:background .3s}
+  .player-submitted.active{background:var(--green)}
+  .host-panel{grid-column:1/-1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+  .host-panel h3{font-size:13px;font-weight:500;margin-bottom:12px}
+  .host-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .status-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:500}
+  .status-chip.live{background:var(--red-bg);color:var(--red)}
+  .status-chip.waiting{background:var(--amber-bg);color:var(--amber)}
+  .dot-blink{width:6px;height:6px;border-radius:50%;background:currentColor;animation:blink 1.2s ease-in-out infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+  #toast-container{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:100;pointer-events:none}
+  .toast{background:var(--text);color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;white-space:nowrap;animation:toast-in .2s ease,toast-out .3s ease 2.5s forwards}
+  .toast.green{background:var(--green)}.toast.red{background:var(--red)}
+  @keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes toast-out{from{opacity:1}to{opacity:0}}
+  .interrupt-flash{display:none;position:fixed;inset:0;background:rgba(192,57,43,.07);z-index:50;pointer-events:none;animation:flash .5s ease forwards}
+  @keyframes flash{0%{opacity:1}100%{opacity:0}}
 </style>
 </head>
 <body>
-
-<!-- LANDING -->
 <div id="landing">
   <div class="wordmark">Listening Party</div>
   <div class="landing-cards">
@@ -683,11 +471,8 @@
   </div>
 </div>
 
-<!-- APP -->
 <div id="app">
   <div class="app-shell">
-
-    <!-- HEADER -->
     <div class="app-header">
       <div class="room-info">
         <span class="wordmark">Listening Party</span>
@@ -695,33 +480,29 @@
         <span class="share-hint">share this code to invite friends</span>
         <div id="status-chip-wrap"></div>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;">
+      <div style="display:flex;align-items:center;gap:10px">
         <div id="avatar-row"></div>
         <button class="btn btn-outline btn-sm" id="host-btn" style="display:none" onclick="toggleHostPanel()">⚙ Host</button>
       </div>
     </div>
 
-    <!-- NOW PLAYING -->
     <div class="now-playing">
       <div class="section-label">Now playing</div>
-
       <div class="no-song-state" id="no-song-state">
-        <div style="font-size:32px;">♫</div>
-        <div style="font-size:14px;color:var(--text-2);">Waiting for the first song…</div>
-        <div style="font-size:12px;">Submit a YouTube link to kick things off</div>
+        <div style="font-size:32px">♫</div>
+        <div style="font-size:14px;color:var(--text-2)">Waiting for the first song…</div>
+        <div style="font-size:12px">Submit a YouTube link to kick things off</div>
       </div>
-
       <div id="song-state">
         <div id="yt-player-wrap"><div id="yt-player"></div></div>
         <div class="song-display">
-          <div class="album-art" id="album-art" style="display:none;">♪</div>
+          <div class="album-art" id="album-art" style="display:none">♪</div>
           <div class="song-meta">
             <div class="song-title" id="song-title">—</div>
             <div class="song-submitter" id="song-submitter"></div>
             <a class="song-link" id="song-link" href="#" target="_blank"></a>
           </div>
         </div>
-
         <div class="progress-wrap">
           <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-fill" style="width:0%"></div></div>
           <div class="progress-meta">
@@ -730,7 +511,6 @@
             <span id="progress-total">0:00</span>
           </div>
         </div>
-
         <div class="tension-wrap">
           <div class="tension-label-row">
             <span class="section-label" style="margin:0">Submissions</span>
@@ -741,9 +521,7 @@
       </div>
     </div>
 
-    <!-- SIDEBAR -->
     <div class="sidebar">
-
       <div class="my-submission">
         <div class="section-label">My pick</div>
         <div class="submit-area" id="submit-area">
@@ -756,23 +534,19 @@
           <button class="btn btn-outline btn-sm" onclick="cancelSubmission()" style="width:100%">Change pick</button>
         </div>
       </div>
-
       <div class="leaderboard">
         <div class="section-label">Players</div>
-        <div id="player-list"><div style="color:var(--text-3);font-size:13px;padding:12px 0;">Waiting for players…</div></div>
+        <div id="player-list"><div style="color:var(--text-3);font-size:13px;padding:12px 0">Waiting for players…</div></div>
       </div>
-
     </div>
 
-    <!-- HOST PANEL -->
-    <div class="host-panel" id="host-panel" style="display:none;">
+    <div class="host-panel" id="host-panel" style="display:none">
       <h3>Host controls</h3>
       <div class="host-actions">
         <button class="btn btn-outline btn-sm" onclick="hostSkipSong()">⏭ Skip song</button>
         <button class="btn btn-outline btn-sm" onclick="hostResetScores()">↺ Reset scores</button>
       </div>
     </div>
-
   </div>
 </div>
 
