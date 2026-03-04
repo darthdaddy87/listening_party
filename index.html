@@ -129,9 +129,8 @@
       const song = room.currentSong || null;
 
       renderAvatars(players);
-      renderPlayerList(players, submissions);
-      renderTensionDots(players, submissions);
-      renderSubmitArea(submissions);
+      renderPlayerList(players);
+        renderSubmitArea(submissions);
       updateStatusChip(!!song);
 
       // Song changed?
@@ -145,8 +144,13 @@
       if (!local.isHost) return;
 
       const pc = Object.keys(players).length;
-      const sc = Object.keys(submissions).length;
-      const maj = Math.ceil(pc / 2);
+      const djId = song ? song.submitterId : null;
+
+      // Only non-DJ submissions count toward the cut threshold
+      const nonDjSubmissions = Object.keys(submissions).filter(pid => pid !== djId);
+      const nonDjPlayers = pc - (djId ? 1 : 0);
+      const maj = Math.ceil(nonDjPlayers / 2);
+      const sc = nonDjSubmissions.length;
 
       if (song && sc >= maj && !window._majorityTriggered) {
         window._majorityTriggered = true;
@@ -154,11 +158,14 @@
       }
       if (song && sc < maj) window._majorityTriggered = false;
 
-      if (!song && sc >= maj && !window._firstSongTriggered) {
+      // First song — all players count (no DJ yet)
+      const scAll = Object.keys(submissions).length;
+      const majAll = Math.ceil(pc / 2);
+      if (!song && scAll >= majAll && !window._firstSongTriggered) {
         window._firstSongTriggered = true;
         setTimeout(() => triggerCut(players, submissions, null), 800);
       }
-      if (!song && sc < maj) window._firstSongTriggered = false;
+      if (!song && scAll < majAll) window._firstSongTriggered = false;
     });
   }
 
@@ -168,7 +175,7 @@
       `<div class="avatar" style="background:${p.color}">${p.name[0].toUpperCase()}</div>`).join('');
   }
 
-  function renderPlayerList(players, submissions) {
+  function renderPlayerList(players) {
     const sorted = Object.entries(players).sort((a,b) => b[1].score - a[1].score);
     // Persist current score to localStorage
     const myEntry = players[local.playerId];
@@ -178,7 +185,6 @@
         <div class="player-rank">${i+1}</div>
         <div class="avatar-sm" style="background:${p.color}">${p.name[0].toUpperCase()}</div>
         <div class="player-name ${pid===local.playerId?'is-you':''}">${p.name}</div>
-        <div class="player-submitted ${submissions[pid]?'active':''}"></div>
         <div class="player-score">${p.score}</div>
         ${local.isHost && pid !== local.playerId ? `<button class="remove-btn" onclick="hostRemovePlayer('${pid}')">✕</button>` : ''}
       </div>`).join('');
@@ -191,19 +197,6 @@
     toast('Player removed');
   };
 
-  function renderTensionDots(players, submissions) {
-    const n = Object.keys(players).length;
-    const s = Object.keys(submissions).length;
-    const maj = Math.ceil(n/2);
-    document.getElementById('tension-dots').innerHTML = Array.from({length:n},(_,i) => {
-      const cls = i < s ? (s >= maj ? 'active warning' : 'active') : '';
-      return `<div class="tension-dot ${cls}"></div>`;
-    }).join('');
-    const el = document.getElementById('tension-status');
-    if (s === 0) el.textContent = 'Nobody submitted yet';
-    else if (s < maj) el.textContent = `${s} in — need ${maj-s} more to cut`;
-    else el.textContent = 'Majority reached — cutting…';
-  }
 
   function renderSubmitArea(submissions) {
     const mine = submissions[local.playerId];
@@ -247,15 +240,31 @@
 
     if (currentSong) {
       const djId = currentSong.submitterId;
-      const djPts = Math.floor(local.progress / 34);
-      const cutterPts = Math.floor(local.progress / 33) + 1;
-      if (djPts > 0) updates[`players/${djId}/score`] = (players[djId]?.score||0) + djPts;
-      updates[`players/${winnerId}/score`] = (winnerPlayer?.score||0) + cutterPts;
-      // flash
+      const p = local.progress;
+
+      if (winnerId === djId) {
+        // DJ cut their own song — lose 3 pts, everyone else with a submission gets 3
+        updates[`players/${djId}/score`] = Math.max(0, (players[djId]?.score||0) - 3);
+        for (const pid of Object.keys(submissions)) {
+          if (pid !== djId) {
+            updates[`players/${pid}/score`] = (players[pid]?.score||0) + 3;
+          }
+        }
+        toast(`${winnerPlayer?.name} cut their own song! -3 pts`, 'red');
+      } else {
+        // Normal cut scoring
+        let djPts = 0, cutterPts = 0;
+        if (p < 66)      { cutterPts = 3; djPts = 0; }
+        else if (p < 90) { cutterPts = 2; djPts = 1; }
+        else             { cutterPts = 1; djPts = 2; }
+        updates[`players/${winnerId}/score`] = (winnerPlayer?.score||0) + cutterPts;
+        if (djPts > 0) updates[`players/${djId}/score`] = (players[djId]?.score||0) + djPts;
+        toast(`${winnerPlayer?.name} cuts the song! +${cutterPts} pts`, 'red');
+      }
+
       const flash = document.getElementById('interrupt-flash');
       flash.style.display = 'block';
       setTimeout(() => flash.style.display = 'none', 500);
-      toast(`${winnerPlayer?.name} cuts the song!`,'red');
     }
 
     updates['currentSong'] = { link:winnerSub.link, submitterId:winnerId, submitterName:winnerPlayer?.name||'?' };
@@ -376,14 +385,46 @@
     if (!snap.exists()) return;
     const room = snap.val();
     if (!room.currentSong) return;
+
     const djId = room.currentSong.submitterId;
+    const djName = room.currentSong.submitterName;
     const players = room.players||{};
+    const submissions = room.submissions||{};
     const updates = {};
-    updates[`players/${djId}/score`] = (players[djId]?.score||0)+3;
-    updates['currentSong'] = null; updates['songStartedAt'] = null; updates['submissions'] = null;
+
+    // Award 3 pts for song completing
+    updates[`players/${djId}/score`] = (players[djId]?.score||0) + 3;
+    toast(`${djName}'s song played through! +3 pts`, 'green');
+
+    // Find earliest next submission if any
+    let nextWinnerId = null, earliest = Infinity;
+    for (const [pid, sub] of Object.entries(submissions)) {
+      if (sub.timestamp < earliest) { earliest = sub.timestamp; nextWinnerId = pid; }
+    }
+
+    if (nextWinnerId) {
+      const nextSub = submissions[nextWinnerId];
+      const nextPlayer = players[nextWinnerId];
+      const isConsecutive = nextWinnerId === djId;
+
+      if (isConsecutive) {
+        // Consecutive bonus — 6 pts instead of 3 (3 already awarded above, add 3 more)
+        updates[`players/${djId}/score`] = (players[djId]?.score||0) + 6;
+        toast(`${djName} goes again! +6 pts total`, 'green');
+      }
+
+      updates['currentSong'] = { link: nextSub.link, submitterId: nextWinnerId, submitterName: nextPlayer?.name||'?' };
+      updates['songStartedAt'] = firebase.database.ServerValue.TIMESTAMP;
+      updates['submissions'] = null;
+    } else {
+      updates['currentSong'] = null;
+      updates['songStartedAt'] = null;
+      updates['submissions'] = null;
+    }
+
     await db.ref(`rooms/${local.roomCode}`).update(updates);
-    toast(`${room.currentSong.submitterName}'s song played through! +3 pts`,'green');
-    window._majorityTriggered = false; window._firstSongTriggered = false;
+    window._majorityTriggered = false;
+    window._firstSongTriggered = false;
   }
 
   // ── HOST CONTROLS ──
@@ -469,14 +510,7 @@
   .progress-meta{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--text-2)}
   .points-preview{font-family:'DM Mono',monospace;font-size:11px;padding:2px 8px;border-radius:4px;background:var(--amber-bg);color:var(--amber)}
   /* TENSION */
-  .tension-wrap{display:flex;flex-direction:column;gap:8px}
-  .tension-label-row{display:flex;justify-content:space-between;align-items:center}
-  .tension-dots{display:flex;gap:6px}
-  .tension-dot{width:8px;height:8px;border-radius:50%;background:var(--border);transition:background .3s,transform .3s}
-  .tension-dot.active{background:var(--text);transform:scale(1.2)}
-  .tension-dot.warning{background:var(--amber);animation:dot-pulse .8s ease-in-out infinite alternate}
   @keyframes dot-pulse{from{transform:scale(1)}to{transform:scale(1.4)}}
-  .tension-status{font-size:12px;color:var(--text-2);font-style:italic}
   /* SIDEBAR */
   .sidebar{display:flex;flex-direction:column;gap:16px}
   .my-submission{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
@@ -492,8 +526,6 @@
   .player-name.is-you{font-weight:500}
   .player-name.is-you::after{content:' (you)';font-weight:300;color:var(--text-2)}
   .player-score{font-family:'DM Mono',monospace;font-size:13px;font-weight:500}
-  .player-submitted{width:8px;height:8px;border-radius:50%;background:var(--border);transition:background .3s}
-  .player-submitted.active{background:var(--green)}
   .remove-btn{background:none;border:none;color:var(--text-3);cursor:pointer;font-size:12px;padding:2px 4px;border-radius:4px;line-height:1;transition:color .15s,background .15s}
   .remove-btn:hover{color:var(--red);background:var(--red-bg)}
   .host-panel{grid-column:1/-1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
@@ -573,13 +605,6 @@
             <span class="points-preview" id="points-preview">+0 pts</span>
             <span id="progress-total">0:00</span>
           </div>
-        </div>
-        <div class="tension-wrap">
-          <div class="tension-label-row">
-            <span class="section-label" style="margin:0">Submissions</span>
-            <span class="tension-status" id="tension-status"></span>
-          </div>
-          <div class="tension-dots" id="tension-dots"></div>
         </div>
       </div>
     </div>
