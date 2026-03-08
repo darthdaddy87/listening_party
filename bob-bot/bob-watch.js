@@ -64,7 +64,7 @@ const PLAYLIST = [
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-let currentSongKey  = null; // link+submitterId to detect song changes
+let currentSongKey  = '__init__'; // sentinel — ensures first poll always triggers state check
 let songEndTimer    = null; // setTimeout for end-of-song check
 let lastCommentary  = 0;    // timestamp of last ambient log entry
 let playedLinks     = new Set(); // avoid repeating Bob's own picks
