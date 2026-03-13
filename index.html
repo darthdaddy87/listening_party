@@ -24,8 +24,17 @@
   const COLORS = ['#2d6a4f','#1a4a8a','#7b2d8b','#b45309','#c0392b','#1a7a6e','#5a3e8a','#8a5c1a'];
   const local = { roomCode:null, playerId:null, playerName:null, isHost:false, progress:0, songDuration:210, songStartTime:null, progressInterval:null, pendingVideoId:null };
 
+  // ── YOUTUBE SEARCH ──
+  // Get a key at console.cloud.google.com → APIs → YouTube Data API v3 → Credentials
+  // Restrict it to your GitHub Pages domain (duaneharper.github.io) for safety.
+  const YT_SEARCH_KEY = '';
+  let _ytResults = [];
+
   function rref(path) { return db.ref(path ? `rooms/${local.roomCode}/${path}` : `rooms/${local.roomCode}`); }
   function genCode() { return Math.random().toString(36).substring(2,7).toUpperCase(); }
+  function escapeHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
 
 
   // ── SESSION PERSISTENCE ──
@@ -51,10 +60,33 @@
     if (!roomSnap.exists()) { clearSession(); return false; }
     const room = roomSnap.val();
 
-    // Migration guard: old sessions used genId() short strings, new ones use Firebase UIDs
+    // Migration guard: old sessions used genId() short strings, new ones use Firebase UIDs.
+    // If UID changed (e.g. auth session expired on mobile Safari / Firefox), auto-rejoin
+    // with the saved identity rather than forcing the player back to the landing screen.
     if (session.playerId !== auth.currentUser.uid) {
-      clearSession();
-      return false;
+      // Hosts can't silently re-claim host authority with a new UID — bail to landing
+      if (!session.playerName || session.playerName === '__host__' || session.isHost) {
+        clearSession(); return false;
+      }
+      // Player's anonymous auth expired — mint a new entry under the new UID,
+      // preserving their name and score from the saved session.
+      const newPid = auth.currentUser.uid;
+      const players = room.players || {};
+      const taken = Object.values(players).map(p => p.color);
+      const color = COLORS.find(c => !taken.includes(c)) || COLORS[Math.floor(Math.random()*COLORS.length)];
+      local.roomCode = session.roomCode;
+      local.playerId = newPid;
+      local.playerName = session.playerName;
+      local.isHost = false;
+      local.isRemote = session.isRemote || false;
+      await db.ref(`rooms/${session.roomCode}/players/${newPid}`).set({
+        name: session.playerName, score: session.score || 0, color,
+        joinedAt: firebase.database.ServerValue.TIMESTAMP
+      });
+      saveSession();
+      initApp();
+      toast('Reconnected ✓', 'green');
+      return true;
     }
 
     local.roomCode = session.roomCode;
@@ -169,6 +201,26 @@
 
     subscribeToRoom();
     initYouTube();
+
+    // Monitor Firebase connection state — only show banner after first successful connection
+    // so it doesn't flash on every page load while Firebase is initialising
+    let _everConnected = false;
+    db.ref('.info/connected').on('value', snap => {
+      const connected = snap.val();
+      if (connected) {
+        _everConnected = true;
+        document.getElementById('connection-banner').style.display = 'none';
+      } else if (_everConnected) {
+        document.getElementById('connection-banner').style.display = 'block';
+      }
+    });
+
+    if (local.isHost) {
+      const roomRef = db.ref(`rooms/${local.roomCode}`);
+      roomRef.update({ hostOnline: true, hostDisconnectedAt: null });
+      roomRef.child('hostOnline').onDisconnect().set(false);
+      roomRef.child('hostDisconnectedAt').onDisconnect().set(firebase.database.ServerValue.TIMESTAMP);
+    }
   }
 
   // Auto-fill room code from URL param
@@ -196,7 +248,9 @@
       const deletions = [];
       snap.forEach(child => {
         const room = child.val();
-        if (room.createdAt && room.createdAt < cutoff) {
+        if (room.hostOnline === true) return; // live room — never touch it
+        const expiry = room.hostDisconnectedAt || room.createdAt; // prefer disconnect time, fall back to creation
+        if (expiry && expiry < cutoff) {
           deletions.push(db.ref('rooms/' + child.key).remove());
         }
       });
@@ -215,6 +269,42 @@
     tryAutoReconnect();
   });
 
+  // ── HOST PRESENCE ──
+  let _hostOfflineTimer = null;
+  let _hostOfflineInterval = null;
+
+  function handleHostPresence(hostOnline) {
+    if (hostOnline === false && !_hostOfflineTimer) {
+      // Host just dropped — start the 60s countdown
+      let remaining = 60;
+      document.getElementById('host-offline-countdown').textContent = remaining;
+      document.getElementById('host-offline-banner').style.display = 'block';
+      _hostOfflineTimer = true;
+      _hostOfflineInterval = setInterval(() => {
+        remaining--;
+        document.getElementById('host-offline-countdown').textContent = remaining;
+        if (remaining <= 0) {
+          clearInterval(_hostOfflineInterval);
+          _hostOfflineInterval = null;
+          _hostOfflineTimer = null;
+          db.ref(`rooms/${local.roomCode}`).remove();
+          showRoomDeadState();
+        }
+      }, 1000);
+    } else if (hostOnline === true && _hostOfflineTimer) {
+      // Host came back — cancel countdown
+      clearInterval(_hostOfflineInterval);
+      _hostOfflineInterval = null;
+      _hostOfflineTimer = null;
+      document.getElementById('host-offline-banner').style.display = 'none';
+    }
+  }
+
+  function showRoomDeadState() {
+    document.getElementById('host-offline-banner').style.display = 'none';
+    document.getElementById('room-dead-overlay').classList.add('visible');
+  }
+
   // ── SUBSCRIBE ──
   let prevSongKey = null;
   window._majorityTriggered = false;
@@ -222,7 +312,7 @@
 
   function subscribeToRoom() {
     db.ref(`rooms/${local.roomCode}`).on('value', snap => {
-      if (!snap.exists()) return;
+      if (!snap.exists()) { showRoomDeadState(); return; }
       const room = snap.val();
       const allPlayers = room.players || {};
       // In host-only mode, filter the host out of the player list entirely
@@ -245,7 +335,7 @@
         else stopSong();
       }
 
-      if (!local.isHost) return;
+      if (!local.isHost) { handleHostPresence(room.hostOnline); return; }
 
       const pc = Object.keys(players).length;
       const djId = song ? song.submitterId : null;
@@ -274,7 +364,7 @@
   // ── RENDER ──
   function renderAvatars(players) {
     document.getElementById('avatar-row').innerHTML = Object.values(players).slice(0,6).map(p =>
-      `<div class="avatar" style="background:${p.color}">${p.name[0].toUpperCase()}</div>`).join('');
+      `<div class="avatar" style="background:${p.color}">${escapeHtml(p.name[0].toUpperCase())}</div>`).join('');
   }
 
   function renderPlayerList(players) {
@@ -284,8 +374,8 @@
     const html = sorted.map(([pid,p],i) => `
       <div class="player-row">
         <div class="player-rank">${i+1}</div>
-        <div class="avatar-sm" style="background:${p.color}">${p.name[0].toUpperCase()}</div>
-        <div class="player-name ${pid===local.playerId?'is-you':''}">${p.name}</div>
+        <div class="avatar-sm" style="background:${p.color}">${escapeHtml(p.name[0].toUpperCase())}</div>
+        <div class="player-name ${pid===local.playerId?'is-you':''}">${escapeHtml(p.name)}</div>
         <div class="player-score">${p.score}</div>
         ${local.isHost && pid !== local.playerId ? `<button class="remove-btn" onclick="hostRemovePlayer('${pid}')">✕</button>` : ''}
       </div>`).join('');
@@ -308,7 +398,13 @@
     const mine = submissions[local.playerId];
     document.getElementById('submit-area').style.display = mine ? 'none' : 'flex';
     document.getElementById('submitted-state').style.display = mine ? 'flex' : 'none';
-    if (mine) document.getElementById('submitted-link-display').textContent = mine.link;
+    if (mine) {
+      document.getElementById('submitted-link-display').textContent = mine.link;
+      // Clear any open search results
+      document.getElementById('yt-search-results').style.display = 'none';
+      document.getElementById('yt-search-input').value = '';
+      _ytResults = [];
+    }
   }
 
   function updateStatusChip(live) {
@@ -317,11 +413,51 @@
       : `<span class="status-chip waiting"><span class="dot-blink"></span> Waiting</span>`;
   }
 
+  // ── YOUTUBE SEARCH ──
+  window.searchYouTube = async function() {
+    if (!YT_SEARCH_KEY) { toast('No YouTube API key configured', 'red'); return; }
+    const q = document.getElementById('yt-search-input').value.trim();
+    if (!q) { toast('Enter something to search', 'red'); return; }
+    const resultsEl = document.getElementById('yt-search-results');
+    resultsEl.style.display = 'flex';
+    resultsEl.innerHTML = '<div class="yt-searching">Searching…</div>';
+    try {
+      const res = await fetch(
+        `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=5&q=${encodeURIComponent(q)}&key=${YT_SEARCH_KEY}`
+      );
+      const data = await res.json();
+      if (data.error) { resultsEl.innerHTML = `<div class="yt-searching">${escapeHtml(data.error.message)}</div>`; return; }
+      if (!data.items?.length) { resultsEl.innerHTML = '<div class="yt-searching">No results found</div>'; return; }
+      _ytResults = data.items;
+      resultsEl.innerHTML = data.items.map((item, i) => {
+        const title = escapeHtml(item.snippet.title);
+        const thumb = item.snippet.thumbnails.medium?.url || item.snippet.thumbnails.default?.url || '';
+        return `<div class="yt-result-card" onclick="selectYTResult(${i})">
+          <img class="yt-result-thumb" src="${thumb}" alt="" loading="lazy">
+          <span class="yt-result-title">${title}</span>
+        </div>`;
+      }).join('');
+    } catch(e) {
+      resultsEl.innerHTML = '<div class="yt-searching">Search failed — check your connection</div>';
+    }
+  };
+
+  window.selectYTResult = function(i) {
+    const item = _ytResults[i];
+    if (!item) return;
+    document.getElementById('link-input').value = `https://www.youtube.com/watch?v=${item.id.videoId}`;
+    document.getElementById('yt-search-results').style.display = 'none';
+    document.getElementById('yt-search-input').value = '';
+    _ytResults = [];
+    submitSong();
+  };
+
   // ── SUBMIT ──
   window.submitSong = async function() {
     const input = document.getElementById('link-input');
     const link = input.value.trim();
     if (!link) { toast('Paste a link first','red'); return; }
+    if (!extractYouTubeId(link)) { toast('Please paste a YouTube link','red'); return; }
     await rref(`submissions/${local.playerId}`).set({ link, playerName:local.playerName, timestamp:Date.now() });
     input.value = '';
     toast('Locked in ✓','green');
@@ -334,6 +470,17 @@
   // ── CUT ──
   async function triggerCut(players, submissions, currentSong) {
     if (!local.isHost) return;
+
+    // Atomically claim the cut — prevents duplicate processing if hostComplete
+    // and majority cut fire simultaneously. Firebase transaction guarantees only
+    // one writer wins; the other gets committed:false and bails out cleanly.
+    const lockRef = db.ref(`rooms/${local.roomCode}/cutLock`);
+    const lockResult = await lockRef.transaction(current => {
+      if (current) return undefined; // already locked — abort
+      return Date.now();             // claim the lock
+    });
+    if (!lockResult.committed) return; // lost the race, bail out
+
     let winnerId = null, earliest = Infinity;
     for (const [pid,sub] of Object.entries(submissions)) {
       if (sub.timestamp < earliest) { earliest = sub.timestamp; winnerId = pid; }
@@ -376,6 +523,7 @@
     updates['currentSong'] = { link:winnerSub.link, submitterId:winnerId, submitterName:winnerPlayer?.name||'?' };
     updates['songStartedAt'] = firebase.database.ServerValue.TIMESTAMP;
     updates['submissions'] = null;
+    updates['cutLock'] = null; // release lock atomically with the rest of the cut
     await db.ref(`rooms/${local.roomCode}`).update(updates);
   }
 
@@ -653,6 +801,15 @@
   .sidebar{display:flex;flex-direction:column;gap:16px}
   .my-submission{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
   .submit-area{display:flex;flex-direction:column;gap:10px}
+  .yt-search-row{display:flex;gap:8px;align-items:center}
+  .yt-search-row input{margin-bottom:0;flex:1}
+  .yt-results{flex-direction:column;gap:6px}
+  .yt-result-card{display:flex;gap:10px;align-items:center;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;transition:border-color .15s,background .15s}
+  .yt-result-card:hover{border-color:var(--text);background:var(--surface)}
+  .yt-result-thumb{width:80px;height:45px;border-radius:4px;object-fit:cover;flex-shrink:0;background:var(--border)}
+  .yt-result-title{font-size:12px;line-height:1.4;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .yt-searching{font-size:12px;color:var(--text-3);text-align:center;padding:10px 0;width:100%}
+  .link-divider{font-size:11px;color:var(--text-3);text-align:center;letter-spacing:.05em}
   .submitted-state{display:none;flex-direction:column;gap:10px}
   .submitted-badge{display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--green-bg);border:1px solid #b7e4cc;border-radius:var(--radius-sm);font-size:13px;color:var(--green);font-weight:500}
   .submitted-link{font-family:'DM Mono',monospace;font-size:11px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -706,12 +863,22 @@
   .scoring-note{font-size:12px;color:var(--text-3);line-height:1.6;border-top:1px solid var(--border);padding-top:12px;margin-top:4px}
   .interrupt-flash{display:none;position:fixed;inset:0;background:rgba(192,57,43,.07);z-index:50;pointer-events:none;animation:flash .5s ease forwards}
   @keyframes flash{0%{opacity:1}100%{opacity:0}}
+  /* CONNECTION BANNER */
+  #connection-banner{display:none;position:fixed;top:0;left:0;right:0;z-index:210;background:var(--red-bg);border-bottom:2px solid var(--red);padding:12px 20px;text-align:center;font-size:13px;color:var(--red);font-weight:500}
+  /* HOST OFFLINE BANNER */
+  #host-offline-banner{display:none;position:fixed;top:0;left:0;right:0;z-index:200;background:var(--amber-bg);border-bottom:2px solid var(--amber);padding:12px 20px;text-align:center;font-size:13px;color:var(--amber);font-weight:500}
+  #host-offline-banner strong{font-weight:700}
+  /* ROOM DEAD OVERLAY */
+  #room-dead-overlay{display:none;position:fixed;inset:0;background:var(--bg);z-index:300;flex-direction:column;align-items:center;justify-content:center;gap:16px;text-align:center;padding:24px}
+  #room-dead-overlay.visible{display:flex}
+  #room-dead-overlay h2{font-size:18px;font-weight:500}
+  #room-dead-overlay p{font-size:14px;color:var(--text-2);max-width:280px;line-height:1.6}
 </style>
 </head>
 <body>
 <div id="landing">
   <div style="display:flex;align-items:center;gap:12px;">
-    <div class="wordmark">Listening Party <span style="font-size:10px;opacity:0.5;letter-spacing:0">v1.55</span></div>
+    <div class="wordmark">Listening Party <span style="font-size:10px;opacity:0.5;letter-spacing:0">v1.56</span></div>
     <button class="theme-btn" id="theme-toggle-landing" onclick="toggleTheme()" title="Toggle dark mode"></button>
   </div>
   <div class="landing-cards">
@@ -749,7 +916,7 @@
   <div class="app-shell">
     <div class="app-header">
       <div class="room-info">
-        <span class="wordmark">Listening Party <span style="font-size:10px;opacity:0.5;letter-spacing:0">v1.55</span></span>
+        <span class="wordmark">Listening Party <span style="font-size:10px;opacity:0.5;letter-spacing:0">v1.56</span></span>
         <span class="room-code" id="header-code"></span>
         <span class="share-hint">share this code to invite friends</span>
         <div id="status-chip-wrap"></div>
@@ -808,6 +975,12 @@
       <div class="my-submission">
         <div class="section-label">My pick</div>
         <div class="submit-area" id="submit-area">
+          <div class="yt-search-row">
+            <input type="text" id="yt-search-input" placeholder="Search YouTube Music…" onkeydown="if(event.key==='Enter')searchYouTube()" />
+            <button class="btn btn-outline btn-sm" onclick="searchYouTube()">Search</button>
+          </div>
+          <div id="yt-search-results" class="yt-results" style="display:none"></div>
+          <div class="link-divider">— or paste a link —</div>
           <input type="text" id="link-input" placeholder="Paste a YouTube link…" />
           <button class="btn btn-dark" onclick="submitSong()">Lock in ↵</button>
         </div>
@@ -869,6 +1042,14 @@
 
 <div class="interrupt-flash" id="interrupt-flash"></div>
 <div id="toast-container"></div>
+<div id="connection-banner">⚠️ Connection lost. Reconnecting…</div>
+<div id="host-offline-banner">⚠️ <strong>Host disconnected.</strong> Waiting for them to return… <span id="host-offline-countdown">60</span>s</div>
+<div id="room-dead-overlay">
+  <div style="font-size:40px">🎵</div>
+  <h2>The host has left the building.</h2>
+  <p>This session has ended. Start a new game to keep the party going.</p>
+  <button class="btn-primary" onclick="location.reload()">Start a New Game</button>
+</div>
 <div style="width:100%;text-align:center;padding:24px 0 16px;font-size:11px;">
   <a href="https://www.linkedin.com/in/duaneharper/" target="_blank" style="color:var(--text-3);text-decoration:none;font-family:'DM Sans',sans-serif;transition:color .15s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-3)'">Imagined by Duane Harper</a>
 </div>
